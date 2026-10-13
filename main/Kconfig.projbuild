@@ -1,0 +1,42 @@
+menu "ESP32-P4 H.264 Hardware Encoder"
+
+    config H264_ENCODER_WIDTH
+        int "Frame width"
+        range 80 1920
+        default 320
+        help
+            Frame width in pixels. Use an even value.
+
+    config H264_ENCODER_HEIGHT
+        int "Frame height"
+        range 80 1080
+        default 240
+        help
+            Frame height in pixels. Use an even value.
+
+    config H264_ENCODER_FPS
+        int "Frame rate"
+        range 1 60
+        default 30
+
+    config H264_ENCODER_BITRATE
+        int "Target bitrate (bps)"
+        range 64000 10000000
+        default 512000
+
+    config H264_ENCODER_GOP_SIZE
+        int "GOP size"
+        range 1 255
+        default 30
+
+    config H264_ENCODER_QP_VALUE
+        int "Quantization parameter"
+        range 10 51
+        default 26
+
+    config H264_ENCODER_FRAME_COUNT
+        int "Number of test frames"
+        range 1 255
+        default 10
+
+endmenu
