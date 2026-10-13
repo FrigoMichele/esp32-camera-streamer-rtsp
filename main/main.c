@@ -18,9 +18,16 @@
 #include "esp_log.h"
 #include "esp_attr.h"
 #include "example_sensor_init.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "sdkconfig.h"
 
 static const char *TAG = "camera_encoder";
+
+typedef struct {
+    esp_cam_ctlr_trans_t transaction;
+    SemaphoreHandle_t frame_ready;
+} camera_context_t;
 
 static void check_encoder_result(esp_h264_err_t result, const char *operation)
 {
@@ -43,11 +50,23 @@ static bool IRAM_ATTR camera_get_new_buffer(esp_cam_ctlr_handle_t handle,
                                             esp_cam_ctlr_trans_t *transaction,
                                             void *user_data)
 {
-    const esp_cam_ctlr_trans_t *camera_buffer = user_data;
+    const camera_context_t *camera_context = user_data;
 
-    transaction->buffer = camera_buffer->buffer;
-    transaction->buflen = camera_buffer->buflen;
+    transaction->buffer = camera_context->transaction.buffer;
+    transaction->buflen = camera_context->transaction.buflen;
     return false;
+}
+
+static bool IRAM_ATTR camera_transaction_finished(esp_cam_ctlr_handle_t handle,
+                                                  esp_cam_ctlr_trans_t *transaction,
+                                                  void *user_data)
+{
+    camera_context_t *camera_context = user_data;
+    BaseType_t higher_priority_task_woken = pdFALSE;
+
+    xSemaphoreGiveFromISR(camera_context->frame_ready,
+                           &higher_priority_task_woken);
+    return higher_priority_task_woken == pdTRUE;
 }
 
 static void handle_encoded_frame(const esp_h264_enc_out_frame_t *frame,
@@ -73,10 +92,13 @@ void app_main(void)
     isp_proc_handle_t isp = NULL;
     example_sensor_handle_t sensor = {0};
     esp_h264_enc_handle_t encoder = NULL;
+    SemaphoreHandle_t frame_ready = xSemaphoreCreateBinary();
     uint8_t *camera_frame = NULL;
     uint8_t *encoded_data = NULL;
     uint32_t camera_frame_size = 0;
     uint32_t encoded_buffer_size = 0;
+
+    ESP_ERROR_CHECK(frame_ready ? ESP_OK : ESP_ERR_NO_MEM);
 
     // Power the MIPI CSI PHY.
     esp_ldo_channel_config_t ldo_config = {
@@ -88,9 +110,12 @@ void app_main(void)
     camera_frame = allocate_frame_buffer(frame_size, &camera_frame_size);
     encoded_data = allocate_frame_buffer(frame_size, &encoded_buffer_size);
 
-    esp_cam_ctlr_trans_t camera_transaction = {
-        .buffer = camera_frame,
-        .buflen = camera_frame_size,
+    camera_context_t camera_context = {
+        .transaction = {
+            .buffer = camera_frame,
+            .buflen = camera_frame_size,
+        },
+        .frame_ready = frame_ready,
     };
 
     // Configure the OV5647 over I2C/SCCB.
@@ -119,10 +144,10 @@ void app_main(void)
 
     esp_cam_ctlr_evt_cbs_t callbacks = {
         .on_get_new_trans = camera_get_new_buffer,
-        .on_trans_finished = NULL,
+        .on_trans_finished = camera_transaction_finished,
     };
     ESP_ERROR_CHECK(esp_cam_ctlr_register_event_callbacks(
-        camera, &callbacks, &camera_transaction));
+        camera, &callbacks, &camera_context));
     ESP_ERROR_CHECK(esp_cam_ctlr_enable(camera));
 
     // Convert the Bayer image to YUV420 for the H.264 encoder.
@@ -171,12 +196,16 @@ void app_main(void)
     check_encoder_result(esp_h264_enc_open(encoder), "open encoder");
 
     ESP_ERROR_CHECK(esp_cam_ctlr_start(camera));
+    ESP_ERROR_CHECK(esp_cam_ctlr_receive(
+        camera, &camera_context.transaction, ESP_CAM_CTLR_MAX_DELAY));
     ESP_LOGI(TAG, "capturing OV5647 %" PRIu32 "x%" PRIu32 " frames", width, height);
 
     uint32_t frame_number = 0;
     // Capture and encode frames until the configured limit is reached.
     while (frame_limit == 0 || frame_number < frame_limit) {
-        ESP_ERROR_CHECK(esp_cam_ctlr_receive(camera, &camera_transaction, ESP_CAM_CTLR_MAX_DELAY));
+        ESP_ERROR_CHECK(xSemaphoreTake(frame_ready, portMAX_DELAY) == pdTRUE
+                            ? ESP_OK
+                            : ESP_ERR_TIMEOUT);
 
         input.pts = frame_number * (1000U / CONFIG_H264_ENCODER_FPS);
         check_encoder_result(esp_h264_enc_process(encoder, &input, &output), "encode frame");
@@ -194,6 +223,7 @@ void app_main(void)
     example_sensor_deinit(sensor);
     ESP_ERROR_CHECK(esp_ldo_release_channel(mipi_ldo));
 
+    vSemaphoreDelete(frame_ready);
     esp_h264_free(camera_frame);
     esp_h264_free(encoded_data);
     ESP_LOGI(TAG, "capture complete");
