@@ -16,6 +16,7 @@
 #include "esp_cam_ctlr.h"
 #include "esp_cam_ctlr_csi.h"
 #include "esp_err.h"
+#include "esp_eth.h"
 #include "esp_event.h"
 #include "esp_h264_alloc.h"
 #include "esp_h264_enc_single_hw.h"
@@ -32,6 +33,24 @@
 static const char *TAG = "camera_encoder";
 
 #define RTSP_SERVER_PORT 8554
+#define RTSP_SERVER_ADDRESS "192.168.2.5"
+#define RTSP_SERVER_URI "rtsp://" RTSP_SERVER_ADDRESS ":8554/live"
+
+/* ESP32-P4 Function EV Board Ethernet (IP101, RMII). */
+#define ETHERNET_PHY_ADDR 1
+#define ETHERNET_PHY_RESET_GPIO 51
+#define ETHERNET_MDC_GPIO 31
+#define ETHERNET_MDIO_GPIO 52
+#define ETHERNET_RMII_CLK_GPIO 50
+#define ETHERNET_RMII_TX_EN_GPIO 49
+#define ETHERNET_RMII_TXD0_GPIO 34
+#define ETHERNET_RMII_TXD1_GPIO 35
+#define ETHERNET_RMII_CRS_DV_GPIO 28
+#define ETHERNET_RMII_RXD0_GPIO 29
+#define ETHERNET_RMII_RXD1_GPIO 30
+#define ETHERNET_NETMASK "255.255.255.0"
+#define ETHERNET_GATEWAY "192.168.2.1"
+#define ETHERNET_CONNECT_TIMEOUT_MS 10000
 
 typedef struct {
     esp_cam_ctlr_trans_t transaction;
@@ -52,6 +71,118 @@ typedef struct {
 } rtsp_context_t;
 
 static rtsp_context_t s_rtsp;
+static esp_eth_handle_t s_eth_handle;
+static esp_netif_t *s_eth_netif;
+static SemaphoreHandle_t s_eth_ip_ready;
+
+static esp_err_t configure_ethernet_static_ip(void)
+{
+    esp_err_t result = esp_netif_dhcpc_stop(s_eth_netif);
+    if (result != ESP_OK && result != ESP_ERR_ESP_NETIF_DHCP_ALREADY_STOPPED) {
+        return result;
+    }
+
+    esp_netif_ip_info_t ip_info = {0};
+    ip_info.ip.addr = esp_ip4addr_aton(RTSP_SERVER_ADDRESS);
+    ip_info.netmask.addr = esp_ip4addr_aton(ETHERNET_NETMASK);
+    ip_info.gw.addr = esp_ip4addr_aton(ETHERNET_GATEWAY);
+    return esp_netif_set_ip_info(s_eth_netif, &ip_info);
+}
+
+static void ethernet_event_handler(void *arg, esp_event_base_t event_base,
+                                   int32_t event_id, void *event_data)
+{
+    (void)arg;
+    (void)event_data;
+
+    if (event_base == ETH_EVENT) {
+        switch (event_id) {
+        case ETHERNET_EVENT_CONNECTED: {
+            esp_err_t result = configure_ethernet_static_ip();
+            if (result != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to configure Ethernet static IP: %s",
+                         esp_err_to_name(result));
+            } else {
+                ESP_LOGI(TAG, "Ethernet link up");
+            }
+            break;
+        }
+        case ETHERNET_EVENT_DISCONNECTED:
+            ESP_LOGW(TAG, "Ethernet link down");
+            break;
+        default:
+            break;
+        }
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_ETH_GOT_IP) {
+        const ip_event_got_ip_t *event = event_data;
+        ESP_LOGI(TAG, "Ethernet IP: " IPSTR, IP2STR(&event->ip_info.ip));
+        if (s_eth_ip_ready != NULL) {
+            xSemaphoreGive(s_eth_ip_ready);
+        }
+    }
+}
+
+static void start_ethernet(void)
+{
+    esp_err_t result = esp_netif_init();
+    if (result != ESP_OK && result != ESP_ERR_INVALID_STATE) {
+        ESP_ERROR_CHECK(result);
+    }
+
+    result = esp_event_loop_create_default();
+    if (result != ESP_OK && result != ESP_ERR_INVALID_STATE) {
+        ESP_ERROR_CHECK(result);
+    }
+
+    s_eth_ip_ready = xSemaphoreCreateBinary();
+    ESP_ERROR_CHECK(s_eth_ip_ready != NULL ? ESP_OK : ESP_ERR_NO_MEM);
+
+    eth_mac_config_t mac_config = ETH_MAC_DEFAULT_CONFIG();
+    eth_phy_config_t phy_config = ETH_PHY_DEFAULT_CONFIG();
+    phy_config.phy_addr = ETHERNET_PHY_ADDR;
+    phy_config.reset_gpio_num = ETHERNET_PHY_RESET_GPIO;
+
+    eth_esp32_emac_config_t emac_config = ETH_ESP32_EMAC_DEFAULT_CONFIG();
+    emac_config.smi_gpio.mdc_num = ETHERNET_MDC_GPIO;
+    emac_config.smi_gpio.mdio_num = ETHERNET_MDIO_GPIO;
+    emac_config.clock_config.rmii.clock_mode = EMAC_CLK_EXT_IN;
+    emac_config.clock_config.rmii.clock_gpio =
+        (emac_rmii_clock_gpio_t)ETHERNET_RMII_CLK_GPIO;
+    emac_config.emac_dataif_gpio.rmii.tx_en_num = ETHERNET_RMII_TX_EN_GPIO;
+    emac_config.emac_dataif_gpio.rmii.txd0_num = ETHERNET_RMII_TXD0_GPIO;
+    emac_config.emac_dataif_gpio.rmii.txd1_num = ETHERNET_RMII_TXD1_GPIO;
+    emac_config.emac_dataif_gpio.rmii.crs_dv_num = ETHERNET_RMII_CRS_DV_GPIO;
+    emac_config.emac_dataif_gpio.rmii.rxd0_num = ETHERNET_RMII_RXD0_GPIO;
+    emac_config.emac_dataif_gpio.rmii.rxd1_num = ETHERNET_RMII_RXD1_GPIO;
+
+    esp_eth_mac_t *mac = esp_eth_mac_new_esp32(&emac_config, &mac_config);
+    esp_eth_phy_t *phy = esp_eth_phy_new_ip101(&phy_config);
+    ESP_ERROR_CHECK(mac != NULL && phy != NULL ? ESP_OK : ESP_ERR_NO_MEM);
+
+    esp_eth_config_t eth_config = ETH_DEFAULT_CONFIG(mac, phy);
+    ESP_ERROR_CHECK(esp_eth_driver_install(&eth_config, &s_eth_handle));
+
+    esp_netif_config_t netif_config = ESP_NETIF_DEFAULT_ETH();
+    s_eth_netif = esp_netif_new(&netif_config);
+    ESP_ERROR_CHECK(s_eth_netif != NULL ? ESP_OK : ESP_ERR_NO_MEM);
+
+    esp_eth_netif_glue_handle_t glue = esp_eth_new_netif_glue(s_eth_handle);
+    ESP_ERROR_CHECK(glue != NULL ? ESP_OK : ESP_ERR_NO_MEM);
+    ESP_ERROR_CHECK(esp_netif_attach(s_eth_netif, glue));
+
+    ESP_ERROR_CHECK(esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID,
+                                               ethernet_event_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP,
+                                               ethernet_event_handler, NULL));
+    ESP_ERROR_CHECK(esp_eth_start(s_eth_handle));
+
+    if (xSemaphoreTake(s_eth_ip_ready,
+                       pdMS_TO_TICKS(ETHERNET_CONNECT_TIMEOUT_MS)) != pdTRUE) {
+        ESP_LOGE(TAG, "Ethernet did not obtain %s within %d ms",
+                 RTSP_SERVER_ADDRESS, ETHERNET_CONNECT_TIMEOUT_MS);
+        ESP_ERROR_CHECK(ESP_ERR_TIMEOUT);
+    }
+}
 
 static void check_encoder_result(esp_h264_err_t result, const char *operation)
 {
@@ -152,16 +283,6 @@ static void stop_rtsp_server(void)
 
 static void start_rtsp_server(uint32_t max_frame_size, uint32_t width, uint32_t height)
 {
-    esp_err_t result = esp_netif_init();
-    if (result != ESP_OK && result != ESP_ERR_INVALID_STATE) {
-        ESP_ERROR_CHECK(result);
-    }
-
-    result = esp_event_loop_create_default();
-    if (result != ESP_OK && result != ESP_ERR_INVALID_STATE) {
-        ESP_ERROR_CHECK(result);
-    }
-
     ESP_ERROR_CHECK(media_lib_add_default_adapter());
 
     s_rtsp.latest_frame = malloc(max_frame_size);
@@ -187,9 +308,9 @@ static void start_rtsp_server(uint32_t max_frame_size, uint32_t width, uint32_t 
         .ctx = &s_rtsp,
         .video_enable = true,
         .audio_enable = false,
-        .uri = "rtsp://0.0.0.0:8554/live",
+        .uri = RTSP_SERVER_URI,
         .local_port = RTSP_SERVER_PORT,
-        .local_addr = "0.0.0.0",
+        .local_addr = RTSP_SERVER_ADDRESS,
         .stack_size = 4096,
         .task_prio = 5,
         .mode = RTSP_SERVER,
@@ -205,8 +326,7 @@ static void start_rtsp_server(uint32_t max_frame_size, uint32_t width, uint32_t 
         ESP_ERROR_CHECK(ESP_FAIL);
     }
 
-    ESP_LOGI(TAG, "RTSP server listening on rtsp://<device-ip>:%d/live", RTSP_SERVER_PORT);
-    ESP_LOGW(TAG, "An Ethernet/Wi-Fi interface must be initialized separately on ESP32-P4");
+    ESP_LOGI(TAG, "RTSP server listening on %s", RTSP_SERVER_URI);
 }
 
 static bool IRAM_ATTR camera_get_new_buffer(esp_cam_ctlr_handle_t handle,
@@ -357,6 +477,7 @@ void app_main(void)
 
     check_encoder_result(esp_h264_enc_hw_new(&encoder_config, &encoder), "create encoder");
     check_encoder_result(esp_h264_enc_open(encoder), "open encoder");
+    start_ethernet();
     start_rtsp_server(encoded_buffer_size, width, height);
 
     ESP_ERROR_CHECK(esp_cam_ctlr_start(camera));

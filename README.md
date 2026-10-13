@@ -25,27 +25,46 @@ idf.py build flash monitor
 The application starts an H.264 RTSP server on TCP port `8554`:
 
 ```text
-rtsp://<device-ip>:8554/live
+rtsp://192.168.2.5:8554/live
 ```
 
 The server uses Espressif's `esp_media_protocols` component. Encoded frames
 are copied from the H.264 encoder into the RTSP callback buffer. Use VLC or
 `ffplay` to open the URL.
 
-This project does not configure a network interface because ESP32-P4 boards
-have board-specific Ethernet/PHY wiring and no integrated Wi-Fi. Initialize
-Ethernet or an external Wi-Fi interface before `start_rtsp_server()` in
-`main/main.c`.
+The application configures the internal EMAC and IP101 PHY on the ESP32-P4
+Function EV Board, then assigns the static Ethernet settings below before
+starting RTSP:
+
+| Setting | Value |
+|---|---|
+| Address | `192.168.2.5` |
+| Netmask | `255.255.255.0` |
+| Gateway | `192.168.2.1` |
+| PHY address | `1` |
+| PHY reset | GPIO `51` |
+| RMII clock | GPIO `50` (external PHY clock) |
+
+The board's Ethernet cable and playback computer must be on the
+`192.168.2.0/24` network. ESP32-P4 has no integrated Wi-Fi; use a separate
+Wi-Fi interface or adjust the board-specific Ethernet initialization if your
+hardware is not the Function EV Board.
 
 ## Hardware configuration
 
-The default configuration follows the ESP-IDF camera example:
+The camera defaults follow the ESP-IDF camera example; Ethernet uses the Function EV Board pinout:
 
 | Signal | Default GPIO |
 |---|---:|
 | Camera SDA | 7 |
 | Camera SCL | 8 |
 | MIPI PHY LDO | channel 3, 2500 mV |
+| Ethernet MDC | 31 |
+| Ethernet MDIO | 52 |
+| RMII TXEN | 49 |
+| RMII TXD0/TXD1 | 34/35 |
+| RMII RXDV | 28 |
+| RMII RXD0/RXD1 | 29/30 |
 
 MIPI CSI clock/data pins are fixed by the ESP32-P4 board's CSI connector and
 are not GPIO-configurable in this application. Verify the pinout and the LDO
