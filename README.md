@@ -1,21 +1,55 @@
-# ESP32-P4 H.264 hardware encoder
+# ESP32-P4 OV5647 camera to H.264
 
-Minimal encoder-only adaptation of ESP-IDF's
-[`examples/peripherals/h264`](https://github.com/espressif/esp-idf/tree/master/examples/peripherals/h264).
-The example generates test frames, encodes them with the ESP32-P4 hardware
-encoder, and passes each encoded access unit to `handle_encoded_frame()`.
+Minimal camera capture based on ESP-IDF's
+[`examples/peripherals/camera`](https://github.com/espressif/esp-idf/tree/master/examples/peripherals/camera).
+It is configured for the Raspberry Pi Camera v1.3, which uses the OV5647
+sensor and a two-lane MIPI-CSI2 interface.
+
+The application:
+
+1. Detects and configures the OV5647 over I2C/SCCB.
+2. Captures 800x640 RAW8 frames over MIPI-CSI2.
+3. Uses the ESP32-P4 ISP to convert them to YUV420.
+4. Encodes each frame with the ESP32-P4 hardware H.264 encoder.
+5. Delivers encoded data to `handle_encoded_frame()`.
 
 ## Build
 
 ```sh
 idf.py set-target esp32p4
-idf.py build
+idf.py build flash monitor
 ```
 
-The project is configured exclusively for ESP32-P4 hardware encoding and uses
-PSRAM for the input and output buffers. Configure resolution, frame rate,
-bitrate, GOP, and QP under **H.264 Hardware Encoder** in menuconfig.
+## Hardware configuration
 
-Replace `fill_source_frame()` with camera input and send
-`frame->raw_data.buffer` (`frame->length` bytes) from
-`handle_encoded_frame()` to the RTSP transport.
+The default configuration follows the ESP-IDF camera example:
+
+| Signal | Default GPIO |
+|---|---:|
+| Camera SDA | 7 |
+| Camera SCL | 8 |
+| MIPI PHY LDO | channel 3, 2500 mV |
+
+MIPI CSI clock/data pins are fixed by the ESP32-P4 board's CSI connector and
+are not GPIO-configurable in this application. Verify the pinout and the LDO
+routing for your specific ESP32-P4 board before connecting the camera.
+
+The Raspberry Pi camera is connected to the ESP32-P4 board's MIPI camera
+port. The port provides the CSI clock/data lanes; only the SCCB/I2C pins and
+MIPI PHY supply are configured by this application. Verify the board's camera
+port pinout and voltage levels before connecting the module.
+
+Change GPIOs, resolution, bitrate, and other options with:
+
+```sh
+idf.py menuconfig
+```
+
+The selected sensor mode is fixed at
+`MIPI_2lane_24Minput_RAW8_800x640_50fps`; keep the configured resolution at
+800x640 unless you also change the sensor format string in `main/main.c`.
+
+Set **Number of frames to capture** to zero for continuous capture. Replace
+`handle_encoded_frame()` with the RTSP packetization/transmission code. The
+encoded access unit is in `frame->raw_data.buffer` and has `frame->length`
+bytes.

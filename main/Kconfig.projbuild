@@ -1,28 +1,28 @@
-menu "ESP32-P4 H.264 Hardware Encoder"
+menu "ESP32-P4 Camera and H.264 Encoder"
 
     config H264_ENCODER_WIDTH
-        int "Frame width"
+        int "Camera and encoder width"
         range 80 1920
-        default 320
+        default 800
         help
-            Frame width in pixels. Use an even value.
+            OV5647 capture width. The selected sensor format is 800 pixels wide.
 
     config H264_ENCODER_HEIGHT
-        int "Frame height"
+        int "Camera and encoder height"
         range 80 1080
-        default 240
+        default 640
         help
-            Frame height in pixels. Use an even value.
+            OV5647 capture height. The selected sensor format is 640 pixels high.
 
     config H264_ENCODER_FPS
-        int "Frame rate"
-        range 1 60
+        int "Encoder frame rate"
+        range 1 50
         default 30
 
     config H264_ENCODER_BITRATE
         int "Target bitrate (bps)"
         range 64000 10000000
-        default 512000
+        default 1000000
 
     config H264_ENCODER_GOP_SIZE
         int "GOP size"
@@ -35,8 +35,35 @@ menu "ESP32-P4 H.264 Hardware Encoder"
         default 26
 
     config H264_ENCODER_FRAME_COUNT
-        int "Number of test frames"
-        range 1 255
-        default 10
+        int "Number of frames to capture"
+        range 0 1000000
+        default 0
+        help
+            Set to zero to capture continuously.
+
+    config CAMERA_I2C_SDA
+        int "OV5647 I2C SDA GPIO"
+        range 0 54
+        default 7
+
+    config CAMERA_I2C_SCL
+        int "OV5647 I2C SCL GPIO"
+        range 0 54
+        default 8
+
+    config CAMERA_MIPI_LDO_CHANNEL
+        int "MIPI PHY LDO channel"
+        range 0 7
+        default 3
+
+    config CAMERA_MIPI_LDO_VOLTAGE
+        int "MIPI PHY voltage (mV)"
+        range 1000 3300
+        default 2500
+
+    config CAMERA_MIPI_LANE_BITRATE
+        int "CSI lane bitrate (Mbps)"
+        range 80 2500
+        default 200
 
 endmenu

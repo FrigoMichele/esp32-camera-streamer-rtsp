@@ -1,20 +1,26 @@
 /*
  * SPDX-License-Identifier: Apache-2.0
  *
- * Minimal ESP32-P4 H.264 hardware encoder example.
- * Based on ESP-IDF examples/peripherals/h264.
+ * ESP32-P4 OV5647 MIPI-CSI camera capture and hardware H.264 encoder.
+ * The camera path is based on ESP-IDF examples/peripherals/camera.
  */
 
 #include <inttypes.h>
 #include <stdint.h>
 
+#include "driver/isp.h"
+#include "esp_cam_ctlr.h"
+#include "esp_cam_ctlr_csi.h"
 #include "esp_err.h"
 #include "esp_h264_alloc.h"
 #include "esp_h264_enc_single_hw.h"
+#include "esp_ldo_regulator.h"
 #include "esp_log.h"
+#include "esp_attr.h"
+#include "example_sensor_init.h"
 #include "sdkconfig.h"
 
-static const char *TAG = "h264_encoder";
+static const char *TAG = "camera_encoder";
 
 static void check_encoder_result(esp_h264_err_t result, const char *operation)
 {
@@ -33,33 +39,15 @@ static uint8_t *allocate_frame_buffer(uint32_t size, uint32_t *actual_size)
     return buffer;
 }
 
-/*
- * Generate a neutral O_UYY_E_VYY frame.
- * Replace this function with the camera's YUV frame producer.
- *
- * The ESP32-P4 hardware encoder expects alternating chroma rows:
- *   U Y Y, U Y Y, ...
- *   V Y Y, V Y Y, ...
- */
-static void fill_source_frame(uint8_t *buffer, uint32_t frame_number)
+static bool IRAM_ATTR camera_get_new_buffer(esp_cam_ctlr_handle_t handle,
+                                            esp_cam_ctlr_trans_t *transaction,
+                                            void *user_data)
 {
-    const uint8_t luma = (uint8_t)(16 + (frame_number * 17U) % 220U);
+    const esp_cam_ctlr_trans_t *camera_buffer = user_data;
 
-    for (uint32_t row = 0; row < CONFIG_H264_ENCODER_HEIGHT; row += 2) {
-        const uint8_t chroma = 128;
-
-        for (uint32_t pixel = 0; pixel < CONFIG_H264_ENCODER_WIDTH; pixel += 2) {
-            *buffer++ = chroma;
-            *buffer++ = luma;
-            *buffer++ = luma;
-        }
-
-        for (uint32_t pixel = 0; pixel < CONFIG_H264_ENCODER_WIDTH; pixel += 2) {
-            *buffer++ = chroma;
-            *buffer++ = luma;
-            *buffer++ = luma;
-        }
-    }
+    transaction->buffer = camera_buffer->buffer;
+    transaction->buflen = camera_buffer->buflen;
+    return false;
 }
 
 static void handle_encoded_frame(const esp_h264_enc_out_frame_t *frame,
@@ -73,20 +61,92 @@ static void handle_encoded_frame(const esp_h264_enc_out_frame_t *frame,
 
 void app_main(void)
 {
-    const uint32_t frame_size =
-        (uint32_t)CONFIG_H264_ENCODER_WIDTH * CONFIG_H264_ENCODER_HEIGHT * 3U / 2U;
+    const uint32_t width = CONFIG_H264_ENCODER_WIDTH;
+    const uint32_t height = CONFIG_H264_ENCODER_HEIGHT;
+    const uint32_t frame_size = width * height * 3U / 2U;
+    const uint32_t frame_limit = CONFIG_H264_ENCODER_FRAME_COUNT;
 
-    esp_h264_enc_in_frame_t source_frame = {0};
-    esp_h264_enc_out_frame_t encoded_frame = {0};
+    ESP_ERROR_CHECK((width == 800 && height == 640) ? ESP_OK : ESP_ERR_INVALID_ARG);
+
+    esp_ldo_channel_handle_t mipi_ldo = NULL;
+    esp_cam_ctlr_handle_t camera = NULL;
+    isp_proc_handle_t isp = NULL;
+    example_sensor_handle_t sensor = {0};
     esp_h264_enc_handle_t encoder = NULL;
+    uint8_t *camera_frame = NULL;
+    uint8_t *encoded_data = NULL;
+    uint32_t camera_frame_size = 0;
+    uint32_t encoded_buffer_size = 0;
 
+    // Power the MIPI CSI PHY.
+    esp_ldo_channel_config_t ldo_config = {
+        .chan_id = CONFIG_CAMERA_MIPI_LDO_CHANNEL,
+        .voltage_mv = CONFIG_CAMERA_MIPI_LDO_VOLTAGE,
+    };
+    ESP_ERROR_CHECK(esp_ldo_acquire_channel(&ldo_config, &mipi_ldo));
+
+    camera_frame = allocate_frame_buffer(frame_size, &camera_frame_size);
+    encoded_data = allocate_frame_buffer(frame_size, &encoded_buffer_size);
+
+    esp_cam_ctlr_trans_t camera_transaction = {
+        .buffer = camera_frame,
+        .buflen = camera_frame_size,
+    };
+
+    // Configure the OV5647 over I2C/SCCB.
+    example_sensor_config_t sensor_config = {
+        .i2c_port_num = I2C_NUM_0,
+        .i2c_sda_io_num = CONFIG_CAMERA_I2C_SDA,
+        .i2c_scl_io_num = CONFIG_CAMERA_I2C_SCL,
+        .port = ESP_CAM_SENSOR_MIPI_CSI,
+        .format_name = "MIPI_2lane_24Minput_RAW8_800x640_50fps",
+    };
+    example_sensor_init(&sensor_config, &sensor);
+
+    // Capture RAW8 from the board's MIPI camera port.
+    esp_cam_ctlr_csi_config_t csi_config = {
+        .ctlr_id = 0,
+        .h_res = width,
+        .v_res = height,
+        .lane_bit_rate_mbps = CONFIG_CAMERA_MIPI_LANE_BITRATE,
+        .input_data_color_type = CAM_CTLR_COLOR_RAW8,
+        .output_data_color_type = CAM_CTLR_COLOR_YUV420,
+        .data_lane_num = 2,
+        .byte_swap_en = false,
+        .queue_items = 1,
+    };
+    ESP_ERROR_CHECK(esp_cam_new_csi_ctlr(&csi_config, &camera));
+
+    esp_cam_ctlr_evt_cbs_t callbacks = {
+        .on_get_new_trans = camera_get_new_buffer,
+        .on_trans_finished = NULL,
+    };
+    ESP_ERROR_CHECK(esp_cam_ctlr_register_event_callbacks(
+        camera, &callbacks, &camera_transaction));
+    ESP_ERROR_CHECK(esp_cam_ctlr_enable(camera));
+
+    // Convert the Bayer image to YUV420 for the H.264 encoder.
+    esp_isp_processor_cfg_t isp_config = {
+        .clk_hz = 80 * 1000 * 1000,
+        .input_data_source = ISP_INPUT_DATA_SOURCE_CSI,
+        .input_data_color_type = ISP_COLOR_RAW8,
+        .output_data_color_type = ISP_COLOR_YUV420,
+        .has_line_start_packet = false,
+        .has_line_end_packet = false,
+        .h_res = width,
+        .v_res = height,
+    };
+    ESP_ERROR_CHECK(esp_isp_new_processor(&isp_config, &isp));
+    ESP_ERROR_CHECK(esp_isp_enable(isp));
+
+    // Configure the ESP32-P4 hardware H.264 encoder.
     esp_h264_enc_cfg_hw_t encoder_config = {
         .pic_type = ESP_H264_RAW_FMT_O_UYY_E_VYY,
         .gop = CONFIG_H264_ENCODER_GOP_SIZE,
         .fps = CONFIG_H264_ENCODER_FPS,
         .res = {
-            .width = CONFIG_H264_ENCODER_WIDTH,
-            .height = CONFIG_H264_ENCODER_HEIGHT,
+            .width = width,
+            .height = height,
         },
         .rc = {
             .bitrate = CONFIG_H264_ENCODER_BITRATE,
@@ -94,43 +154,47 @@ void app_main(void)
             .qp_max = CONFIG_H264_ENCODER_QP_VALUE,
         },
     };
+    esp_h264_enc_in_frame_t input = {
+        .raw_data = {
+            .buffer = camera_frame,
+            .len = frame_size,
+        },
+    };
+    esp_h264_enc_out_frame_t output = {
+        .raw_data = {
+            .buffer = encoded_data,
+            .len = encoded_buffer_size,
+        },
+    };
 
-    ESP_ERROR_CHECK((CONFIG_H264_ENCODER_WIDTH % 2 == 0 &&
-                     CONFIG_H264_ENCODER_HEIGHT % 2 == 0)
-                        ? ESP_OK
-                        : ESP_ERR_INVALID_ARG);
-
-    source_frame.raw_data.buffer =
-        allocate_frame_buffer(frame_size, &source_frame.raw_data.len);
-    encoded_frame.raw_data.buffer =
-        allocate_frame_buffer(frame_size, &encoded_frame.raw_data.len);
-
-    check_encoder_result(
-        esp_h264_enc_hw_new(&encoder_config, &encoder), "create encoder");
+    check_encoder_result(esp_h264_enc_hw_new(&encoder_config, &encoder), "create encoder");
     check_encoder_result(esp_h264_enc_open(encoder), "open encoder");
 
-    ESP_LOGI(TAG, "encoding %dx%d at %d fps",
-             CONFIG_H264_ENCODER_WIDTH,
-             CONFIG_H264_ENCODER_HEIGHT,
-             CONFIG_H264_ENCODER_FPS);
+    ESP_ERROR_CHECK(esp_cam_ctlr_start(camera));
+    ESP_LOGI(TAG, "capturing OV5647 %" PRIu32 "x%" PRIu32 " frames", width, height);
 
-    for (uint32_t frame_number = 0;
-         frame_number < CONFIG_H264_ENCODER_FRAME_COUNT;
-         ++frame_number) {
-        fill_source_frame(source_frame.raw_data.buffer, frame_number);
-        source_frame.pts = frame_number * (1000U / CONFIG_H264_ENCODER_FPS);
+    uint32_t frame_number = 0;
+    // Capture and encode frames until the configured limit is reached.
+    while (frame_limit == 0 || frame_number < frame_limit) {
+        ESP_ERROR_CHECK(esp_cam_ctlr_receive(camera, &camera_transaction, ESP_CAM_CTLR_MAX_DELAY));
 
-        check_encoder_result(
-            esp_h264_enc_process(encoder, &source_frame, &encoded_frame),
-            "encode frame");
-        handle_encoded_frame(&encoded_frame, frame_number);
+        input.pts = frame_number * (1000U / CONFIG_H264_ENCODER_FPS);
+        check_encoder_result(esp_h264_enc_process(encoder, &input, &output), "encode frame");
+        handle_encoded_frame(&output, frame_number);
+        ++frame_number;
     }
 
     check_encoder_result(esp_h264_enc_close(encoder), "close encoder");
     check_encoder_result(esp_h264_enc_del(encoder), "delete encoder");
+    ESP_ERROR_CHECK(esp_cam_ctlr_stop(camera));
+    ESP_ERROR_CHECK(esp_cam_ctlr_disable(camera));
+    ESP_ERROR_CHECK(esp_cam_ctlr_del(camera));
+    ESP_ERROR_CHECK(esp_isp_disable(isp));
+    ESP_ERROR_CHECK(esp_isp_del_processor(isp));
+    example_sensor_deinit(sensor);
+    ESP_ERROR_CHECK(esp_ldo_release_channel(mipi_ldo));
 
-    esp_h264_free(source_frame.raw_data.buffer);
-    esp_h264_free(encoded_frame.raw_data.buffer);
-
-    ESP_LOGI(TAG, "encoding complete");
+    esp_h264_free(camera_frame);
+    esp_h264_free(encoded_data);
+    ESP_LOGI(TAG, "capture complete");
 }
