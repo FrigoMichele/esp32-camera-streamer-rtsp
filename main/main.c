@@ -6,28 +6,52 @@
  */
 
 #include <inttypes.h>
+#include <stdbool.h>
 #include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include "driver/isp.h"
+#include "esp_attr.h"
 #include "esp_cam_ctlr.h"
 #include "esp_cam_ctlr_csi.h"
 #include "esp_err.h"
+#include "esp_event.h"
 #include "esp_h264_alloc.h"
 #include "esp_h264_enc_single_hw.h"
 #include "esp_ldo_regulator.h"
 #include "esp_log.h"
-#include "esp_attr.h"
+#include "esp_netif.h"
+#include "esp_rtsp.h"
 #include "example_sensor_init.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "media_lib_adapter.h"
 #include "sdkconfig.h"
 
 static const char *TAG = "camera_encoder";
+
+#define RTSP_SERVER_PORT 8554
 
 typedef struct {
     esp_cam_ctlr_trans_t transaction;
     SemaphoreHandle_t frame_ready;
 } camera_context_t;
+
+typedef struct {
+    SemaphoreHandle_t mutex;
+    SemaphoreHandle_t frame_ready;
+    uint8_t *latest_frame;
+    size_t frame_capacity;
+    size_t frame_length;
+    uint32_t frame_pts;
+    esp_rtsp_handle_t server;
+    esp_rtsp_video_info_t video_info;
+    esp_rtsp_data_cb_t callbacks;
+    esp_rtsp_config_t config;
+} rtsp_context_t;
+
+static rtsp_context_t s_rtsp;
 
 static void check_encoder_result(esp_h264_err_t result, const char *operation)
 {
@@ -44,6 +68,145 @@ static uint8_t *allocate_frame_buffer(uint32_t size, uint32_t *actual_size)
 
     ESP_ERROR_CHECK(buffer != NULL ? ESP_OK : ESP_ERR_NO_MEM);
     return buffer;
+}
+
+static int rtsp_state_handler(esp_rtsp_state_t state, void *ctx)
+{
+    (void)ctx;
+    ESP_LOGI(TAG, "RTSP state: %d", (int)state);
+    return ESP_OK;
+}
+
+static int rtsp_send_video(unsigned char *data, unsigned int *length,
+                           uint32_t *pts, void *ctx)
+{
+    rtsp_context_t *stream = ctx;
+
+    if (stream == NULL || data == NULL || length == NULL || pts == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /* The RTSP task asks for a frame when the client is in PLAY state. */
+    if (xSemaphoreTake(stream->frame_ready, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        *length = 0;
+        return ESP_ERR_TIMEOUT;
+    }
+
+    if (xSemaphoreTake(stream->mutex, portMAX_DELAY) != pdTRUE) {
+        *length = 0;
+        return ESP_FAIL;
+    }
+
+    if (stream->frame_length > stream->frame_capacity) {
+        xSemaphoreGive(stream->mutex);
+        *length = 0;
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    memcpy(data, stream->latest_frame, stream->frame_length);
+    *length = (unsigned int)stream->frame_length;
+    *pts = stream->frame_pts;
+    xSemaphoreGive(stream->mutex);
+    return ESP_OK;
+}
+
+static void rtsp_publish_video(const uint8_t *data, size_t length, uint32_t pts)
+{
+    if (data == NULL || length == 0 || length > s_rtsp.frame_capacity) {
+        ESP_LOGW(TAG, "Dropping H.264 frame of %zu bytes", length);
+        return;
+    }
+
+    if (xSemaphoreTake(s_rtsp.mutex, portMAX_DELAY) != pdTRUE) {
+        return;
+    }
+
+    memcpy(s_rtsp.latest_frame, data, length);
+    s_rtsp.frame_length = length;
+    s_rtsp.frame_pts = pts;
+    xSemaphoreGive(s_rtsp.mutex);
+
+    /* A binary semaphore is enough: the callback always copies the newest frame. */
+    xSemaphoreGive(s_rtsp.frame_ready);
+}
+
+static void stop_rtsp_server(void)
+{
+    if (s_rtsp.server != NULL) {
+        int result = esp_rtsp_server_stop(s_rtsp.server);
+        if (result != ESP_OK) {
+            ESP_LOGW(TAG, "RTSP server stop failed: %d", result);
+        }
+        s_rtsp.server = NULL;
+    }
+
+    if (s_rtsp.frame_ready != NULL) {
+        vSemaphoreDelete(s_rtsp.frame_ready);
+    }
+    if (s_rtsp.mutex != NULL) {
+        vSemaphoreDelete(s_rtsp.mutex);
+    }
+    free(s_rtsp.latest_frame);
+    memset(&s_rtsp, 0, sizeof(s_rtsp));
+}
+
+static void start_rtsp_server(uint32_t max_frame_size, uint32_t width, uint32_t height)
+{
+    esp_err_t result = esp_netif_init();
+    if (result != ESP_OK && result != ESP_ERR_INVALID_STATE) {
+        ESP_ERROR_CHECK(result);
+    }
+
+    result = esp_event_loop_create_default();
+    if (result != ESP_OK && result != ESP_ERR_INVALID_STATE) {
+        ESP_ERROR_CHECK(result);
+    }
+
+    ESP_ERROR_CHECK(media_lib_add_default_adapter());
+
+    s_rtsp.latest_frame = malloc(max_frame_size);
+    s_rtsp.frame_capacity = max_frame_size;
+    s_rtsp.mutex = xSemaphoreCreateMutex();
+    s_rtsp.frame_ready = xSemaphoreCreateBinary();
+    if (s_rtsp.latest_frame == NULL || s_rtsp.mutex == NULL || s_rtsp.frame_ready == NULL) {
+        stop_rtsp_server();
+        ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
+    }
+
+    s_rtsp.video_info = (esp_rtsp_video_info_t) {
+        .vcodec = RTSP_VCODEC_H264,
+        .width = (int)width,
+        .height = (int)height,
+        .fps = CONFIG_H264_ENCODER_FPS,
+        .len = (int)max_frame_size,
+    };
+    s_rtsp.callbacks = (esp_rtsp_data_cb_t) {
+        .send_video = rtsp_send_video,
+    };
+    s_rtsp.config = (esp_rtsp_config_t) {
+        .ctx = &s_rtsp,
+        .video_enable = true,
+        .audio_enable = false,
+        .uri = "rtsp://0.0.0.0:8554/live",
+        .local_port = RTSP_SERVER_PORT,
+        .local_addr = "0.0.0.0",
+        .stack_size = 4096,
+        .task_prio = 5,
+        .mode = RTSP_SERVER,
+        .video_info = &s_rtsp.video_info,
+        .data_cb = &s_rtsp.callbacks,
+        .state = rtsp_state_handler,
+        .trans = RTSP_TRANSPORT_TCP,
+    };
+
+    s_rtsp.server = esp_rtsp_server_start(&s_rtsp.config);
+    if (s_rtsp.server == NULL) {
+        stop_rtsp_server();
+        ESP_ERROR_CHECK(ESP_FAIL);
+    }
+
+    ESP_LOGI(TAG, "RTSP server listening on rtsp://<device-ip>:%d/live", RTSP_SERVER_PORT);
+    ESP_LOGW(TAG, "An Ethernet/Wi-Fi interface must be initialized separately on ESP32-P4");
 }
 
 static bool IRAM_ATTR camera_get_new_buffer(esp_cam_ctlr_handle_t handle,
@@ -75,7 +238,7 @@ static void handle_encoded_frame(const esp_h264_enc_out_frame_t *frame,
     ESP_LOGI(TAG, "frame=%" PRIu32 ", type=%d, bytes=%" PRIu32 ", pts=%" PRIu32,
              frame_number, frame->frame_type, frame->length, frame->pts);
 
-    /* Send frame->raw_data.buffer and frame->length to the RTSP sink here. */
+    rtsp_publish_video(frame->raw_data.buffer, frame->length, frame->pts);
 }
 
 void app_main(void)
@@ -194,6 +357,7 @@ void app_main(void)
 
     check_encoder_result(esp_h264_enc_hw_new(&encoder_config, &encoder), "create encoder");
     check_encoder_result(esp_h264_enc_open(encoder), "open encoder");
+    start_rtsp_server(encoded_buffer_size, width, height);
 
     ESP_ERROR_CHECK(esp_cam_ctlr_start(camera));
     ESP_ERROR_CHECK(esp_cam_ctlr_receive(
@@ -213,6 +377,7 @@ void app_main(void)
         ++frame_number;
     }
 
+    stop_rtsp_server();
     check_encoder_result(esp_h264_enc_close(encoder), "close encoder");
     check_encoder_result(esp_h264_enc_del(encoder), "delete encoder");
     ESP_ERROR_CHECK(esp_cam_ctlr_stop(camera));

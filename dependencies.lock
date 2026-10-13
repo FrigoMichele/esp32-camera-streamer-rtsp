@@ -48,6 +48,43 @@ dependencies:
     - esp32s31
     - esp32p4
     version: 1.4.1
+  espressif/esp_libsrtp:
+    component_hash: 131560184c73ec09f77d8904a2db709307803f0f9f111898921b6966776eac15
+    dependencies: []
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 1.0.0
+  espressif/esp_media_protocols:
+    component_hash: 8d4227d9c46618789d8d3d9eb87ccc999f216d83580c2345c83362178502cafe
+    dependencies:
+    - name: espressif/esp_libsrtp
+      registry_url: https://components.espressif.com
+      require: private
+      version: ^1.0.0
+    - name: espressif/media_lib_sal
+      registry_url: https://components.espressif.com
+      require: private
+      version: ^1.0
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    targets:
+    - esp32
+    - esp32s2
+    - esp32s3
+    - esp32s31
+    - esp32p4
+    - esp32c2
+    - esp32c3
+    - esp32c5
+    - esp32c6
+    - esp32c61
+    - esp32h4
+    version: 1.0.3
   espressif/esp_sccb_intf:
     component_hash: eb6a7d5c992f09583c163b2e3f5e95a0fdc87a2d9f8e026f3e59153935553889
     dependencies:
@@ -58,6 +95,16 @@ dependencies:
       registry_url: https://components.espressif.com
       type: service
     version: 0.0.9
+  espressif/media_lib_sal:
+    component_hash: af39cd5a569f9125ae4782609cd60a2449887df675cba2359a426d480bb560d1
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.1'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 1.0.2
   idf:
     source:
       type: idf
@@ -74,7 +121,8 @@ dependencies:
     version: '*'
 direct_dependencies:
 - espressif/esp_h264
+- espressif/esp_media_protocols
 - sensor_init
-manifest_hash: 13e3276e013cf9e3cc2f644b391e67bb6dc366c7208b1033c34daeca033a3379
+manifest_hash: 448062c6dc3d99dc4015c6d961bb3e95603245b8c9257c83b0a76bef4f120a9b
 target: esp32p4
 version: 2.0.0

@@ -20,6 +20,23 @@ idf.py set-target esp32p4
 idf.py build flash monitor
 ```
 
+## RTSP server
+
+The application starts an H.264 RTSP server on TCP port `8554`:
+
+```text
+rtsp://<device-ip>:8554/live
+```
+
+The server uses Espressif's `esp_media_protocols` component. Encoded frames
+are copied from the H.264 encoder into the RTSP callback buffer. Use VLC or
+`ffplay` to open the URL.
+
+This project does not configure a network interface because ESP32-P4 boards
+have board-specific Ethernet/PHY wiring and no integrated Wi-Fi. Initialize
+Ethernet or an external Wi-Fi interface before `start_rtsp_server()` in
+`main/main.c`.
+
 ## Hardware configuration
 
 The default configuration follows the ESP-IDF camera example:
@@ -49,7 +66,6 @@ The selected sensor mode is fixed at
 `MIPI_2lane_24Minput_RAW8_800x640_50fps`; keep the configured resolution at
 800x640 unless you also change the sensor format string in `main/main.c`.
 
-Set **Number of frames to capture** to zero for continuous capture. Replace
-`handle_encoded_frame()` with the RTSP packetization/transmission code. The
-encoded access unit is in `frame->raw_data.buffer` and has `frame->length`
-bytes.
+Set **Number of frames to capture** to zero for continuous capture.
+`handle_encoded_frame()` publishes each encoded access unit to the RTSP
+server; the data is in `frame->raw_data.buffer` and has `frame->length` bytes.
