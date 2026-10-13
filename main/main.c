@@ -6,6 +6,7 @@
  */
 
 #include <inttypes.h>
+#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -182,6 +183,69 @@ static void start_ethernet(void)
                  RTSP_SERVER_ADDRESS, ETHERNET_CONNECT_TIMEOUT_MS);
         ESP_ERROR_CHECK(ESP_ERR_TIMEOUT);
     }
+}
+
+static uint32_t isp_gamma_curve(uint32_t value)
+{
+    return (uint32_t)(pow((double)value / 256.0, 0.72) * 256.0);
+}
+
+static void configure_isp(isp_proc_handle_t isp)
+{
+    esp_isp_bf_config_t bf_config = {
+        .denoising_level = 5,
+        .padding_mode = ISP_BF_EDGE_PADDING_MODE_SRND_DATA,
+        .bf_template = {
+            {1, 2, 1},
+            {2, 4, 2},
+            {1, 2, 1},
+        },
+    };
+    ESP_ERROR_CHECK(esp_isp_bf_configure(isp, &bf_config));
+    ESP_ERROR_CHECK(esp_isp_bf_enable(isp));
+
+    esp_isp_demosaic_config_t demosaic_config = {
+        .grad_ratio = {
+            .integer = 2,
+            .decimal = 5,
+        },
+    };
+    ESP_ERROR_CHECK(esp_isp_demosaic_configure(isp, &demosaic_config));
+    ESP_ERROR_CHECK(esp_isp_demosaic_enable(isp));
+
+    isp_gamma_curve_points_t gamma_points = {};
+    ESP_ERROR_CHECK(esp_isp_gamma_fill_curve_points(isp_gamma_curve, &gamma_points));
+    ESP_ERROR_CHECK(esp_isp_gamma_configure(isp, COLOR_COMPONENT_R, &gamma_points));
+    ESP_ERROR_CHECK(esp_isp_gamma_configure(isp, COLOR_COMPONENT_G, &gamma_points));
+    ESP_ERROR_CHECK(esp_isp_gamma_configure(isp, COLOR_COMPONENT_B, &gamma_points));
+    ESP_ERROR_CHECK(esp_isp_gamma_enable(isp));
+
+    /* OV5647 ISP calibration matrix from esp_cam_sensor's default profile. */
+    esp_isp_ccm_config_t ccm_config = {
+        .matrix = {
+            { 2.0000f, -0.5459f, -0.4541f },
+            {-0.4751f,  1.7696f, -0.2945f },
+            {-0.2002f, -0.7998f,  2.0000f },
+        },
+        .saturation = true,
+    };
+    ESP_ERROR_CHECK(esp_isp_ccm_configure(isp, &ccm_config));
+    ESP_ERROR_CHECK(esp_isp_ccm_enable(isp));
+
+    esp_isp_color_config_t color_config = {
+        .color_contrast = {
+            .integer = 1,
+            .decimal = 0,
+        },
+        .color_saturation = {
+            .integer = 1,
+            .decimal = 0,
+        },
+        .color_hue = 0,
+        .color_brightness = 0,
+    };
+    ESP_ERROR_CHECK(esp_isp_color_configure(isp, &color_config));
+    ESP_ERROR_CHECK(esp_isp_color_enable(isp));
 }
 
 static void check_encoder_result(esp_h264_err_t result, const char *operation)
@@ -439,13 +503,17 @@ void app_main(void)
         .input_data_source = ISP_INPUT_DATA_SOURCE_CSI,
         .input_data_color_type = ISP_COLOR_RAW8,
         .output_data_color_type = ISP_COLOR_YUV420,
+        .yuv_range = ISP_COLOR_RANGE_FULL,
+        .yuv_std = ISP_YUV_CONV_STD_BT601,
         .has_line_start_packet = false,
         .has_line_end_packet = false,
         .h_res = width,
         .v_res = height,
+        .bayer_order = COLOR_RAW_ELEMENT_ORDER_GBRG,
     };
     ESP_ERROR_CHECK(esp_isp_new_processor(&isp_config, &isp));
     ESP_ERROR_CHECK(esp_isp_enable(isp));
+    configure_isp(isp);
 
     // Configure the ESP32-P4 hardware H.264 encoder.
     esp_h264_enc_cfg_hw_t encoder_config = {
