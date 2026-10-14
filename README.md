@@ -11,7 +11,7 @@ The application:
 2. Captures 800x640 RAW8 frames over MIPI-CSI2.
 3. Uses the ESP32-P4 ISP to convert them to YUV420.
 4. Encodes each frame with the ESP32-P4 hardware H.264 encoder.
-5. Delivers encoded data to `handle_encoded_frame()`.
+5. Publishes encoded H.264 access units to the RTSP module.
 
 ## Build
 
@@ -32,9 +32,9 @@ The server uses Espressif's `esp_media_protocols` component. Encoded frames
 are copied from the H.264 encoder into the RTSP callback buffer. Use VLC or
 `ffplay` to open the URL.
 
-The application configures the internal EMAC and IP101 PHY on the ESP32-P4
+The RTSP module configures the internal EMAC and IP101 PHY on the ESP32-P4
 Function EV Board, then assigns the static Ethernet settings below before
-starting RTSP:
+starting the server:
 
 | Setting | Value |
 |---|---|
@@ -83,8 +83,19 @@ idf.py menuconfig
 
 The selected sensor mode is fixed at
 `MIPI_2lane_24Minput_RAW8_800x640_50fps`; keep the configured resolution at
-800x640 unless you also change the sensor format string in `main/main.c`.
+800x640 unless you also change the sensor format in `main/camera.c`.
 
 Set **Number of frames to capture** to zero for continuous capture.
-`handle_encoded_frame()` publishes each encoded access unit to the RTSP
-server; the data is in `frame->raw_data.buffer` and has `frame->length` bytes.
+
+## Module layout
+
+- `camera.h/.c`: OV5647, MIPI-CSI capture, frame synchronization and all ISP
+  correction (demosaic, denoising, gamma, color correction matrix and color
+  controls).
+- `encoder.h/.c`: opaque hardware H.264 encoder and reusable output buffer.
+- `rtsp.h/.c`: Ethernet initialization, static IP configuration and RTSP
+  server. `rtsp_publish()` copies each encoded frame before returning.
+- `main.c`: connects the three minimal module interfaces.
+
+Each module exposes an opaque handle and returns `esp_err_t` for operations;
+implementation-specific ESP-IDF handles remain private to its `.c` file.
