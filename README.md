@@ -81,9 +81,10 @@ Change GPIOs, resolution, bitrate, and other options with:
 idf.py menuconfig
 ```
 
-The selected sensor mode is fixed at
-`MIPI_2lane_24Minput_RAW8_800x640_50fps`; keep the configured resolution at
-800x640 unless you also change the sensor format in `main/camera.c`.
+The application currently passes
+`MIPI_2lane_24Minput_RAW8_800x640_50fps` as `camera_config.format_name` in
+`main/main.c`. Keep the configured resolution matched to the selected sensor
+format.
 
 Set **Number of frames to capture** to zero for continuous capture.
 

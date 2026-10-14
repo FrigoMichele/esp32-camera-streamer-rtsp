@@ -24,9 +24,7 @@
 
 static const char *TAG = "camera";
 
-#define CAMERA_SENSOR_WIDTH 800U
-#define CAMERA_SENSOR_HEIGHT 640U
-#define CAMERA_SENSOR_FORMAT "MIPI_2lane_24Minput_RAW8_800x640_50fps"
+#define CAMERA_TRANSACTION_TIMEOUT_MS 1000U
 
 struct camera {
     esp_cam_ctlr_handle_t controller;
@@ -46,11 +44,13 @@ struct camera {
     bool isp_enabled;
 };
 
+/** Return one point of the camera gamma correction curve. */
 static uint32_t isp_gamma_curve(uint32_t value)
 {
     return (uint32_t)(pow((double)value / 256.0, 0.72) * 256.0);
 }
 
+/** Configure and enable all ISP corrections used by the camera pipeline. */
 static esp_err_t configure_isp(isp_proc_handle_t isp)
 {
     esp_isp_bf_config_t bf_config = {
@@ -153,6 +153,7 @@ static esp_err_t configure_isp(isp_proc_handle_t isp)
     return esp_isp_color_enable(isp);
 }
 
+/** Give the CSI controller the camera module's reusable frame buffer. */
 static bool IRAM_ATTR camera_get_new_buffer(esp_cam_ctlr_handle_t handle,
                                             esp_cam_ctlr_trans_t *transaction,
                                             void *user_data)
@@ -169,6 +170,7 @@ static bool IRAM_ATTR camera_get_new_buffer(esp_cam_ctlr_handle_t handle,
     return false;
 }
 
+/** Notify the application task that one frame has been captured. */
 static bool IRAM_ATTR camera_transaction_finished(esp_cam_ctlr_handle_t handle,
                                                   esp_cam_ctlr_trans_t *transaction,
                                                   void *user_data)
@@ -186,6 +188,7 @@ static bool IRAM_ATTR camera_transaction_finished(esp_cam_ctlr_handle_t handle,
     return higher_priority_task_woken == pdTRUE;
 }
 
+/** Release initialized camera resources without freeing the camera object. */
 static void camera_release_partial(camera_t *camera)
 {
     if (camera == NULL) {
@@ -268,18 +271,20 @@ esp_err_t camera_create(const camera_config_t *config, camera_t **out_camera)
     }
     *out_camera = NULL;
 
-    if (config->width != CAMERA_SENSOR_WIDTH ||
-        config->height != CAMERA_SENSOR_HEIGHT) {
-        ESP_LOGE(TAG, "sensor mode is fixed at %ux%u",
-                 CAMERA_SENSOR_WIDTH, CAMERA_SENSOR_HEIGHT);
+    if (config->width == 0 || config->height == 0 ||
+        (config->width & 1U) != 0 || (config->height & 1U) != 0 ||
+        config->format_name == NULL || config->format_name[0] == '\0') {
         return ESP_ERR_INVALID_ARG;
     }
 
-    const size_t frame_size =
-        ((size_t)config->width * (size_t)config->height * 3U) / 2U;
-    if (frame_size == 0 || frame_size > UINT32_MAX) {
+    /* YUV420 needs even dimensions; reject arithmetic overflow generically. */
+    const uint64_t frame_size_u64 =
+        ((uint64_t)config->width * (uint64_t)config->height * 3U) / 2U;
+    if (frame_size_u64 == 0 || frame_size_u64 > UINT32_MAX ||
+        frame_size_u64 > SIZE_MAX) {
         return ESP_ERR_INVALID_SIZE;
     }
+    const size_t frame_size = (size_t)frame_size_u64;
 
     camera_t *camera = calloc(1, sizeof(*camera));
     if (camera == NULL) {
@@ -319,7 +324,7 @@ esp_err_t camera_create(const camera_config_t *config, camera_t **out_camera)
         .i2c_sda_io_num = CONFIG_CAMERA_I2C_SDA,
         .i2c_scl_io_num = CONFIG_CAMERA_I2C_SCL,
         .port = ESP_CAM_SENSOR_MIPI_CSI,
-        .format_name = CAMERA_SENSOR_FORMAT,
+        .format_name = config->format_name,
     };
     example_sensor_init(&sensor_config, &camera->sensor);
     camera->sensor_initialized = true;
@@ -420,7 +425,7 @@ esp_err_t camera_start(camera_t *camera)
     camera->controller_started = true;
 
     result = esp_cam_ctlr_receive(camera->controller, &camera->transaction,
-                                  ESP_CAM_CTLR_MAX_DELAY);
+                                  CAMERA_TRANSACTION_TIMEOUT_MS);
     if (result != ESP_OK) {
         (void)esp_cam_ctlr_stop(camera->controller);
         camera->controller_started = false;
@@ -430,16 +435,26 @@ esp_err_t camera_start(camera_t *camera)
     return ESP_OK;
 }
 
+/** Convert milliseconds to a bounded, finite FreeRTOS timeout. */
+static TickType_t camera_timeout_ticks(uint32_t timeout_ms)
+{
+    uint64_t ticks = ((uint64_t)timeout_ms * configTICK_RATE_HZ + 999U) /
+                     1000U;
+    if (ticks >= (uint64_t)portMAX_DELAY) {
+        /* Never pass portMAX_DELAY: FreeRTOS may interpret it as forever. */
+        ticks = (uint64_t)portMAX_DELAY - 1U;
+    }
+    return (TickType_t)ticks;
+}
+
 esp_err_t camera_wait_frame(camera_t *camera, uint32_t timeout_ms)
 {
     if (camera == NULL || camera->frame_ready == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    TickType_t timeout = timeout_ms == CAMERA_WAIT_FOREVER
-                             ? portMAX_DELAY
-                             : pdMS_TO_TICKS(timeout_ms);
-    return xSemaphoreTake(camera->frame_ready, timeout) == pdTRUE
+    return xSemaphoreTake(camera->frame_ready,
+                          camera_timeout_ticks(timeout_ms)) == pdTRUE
                ? ESP_OK
                : ESP_ERR_TIMEOUT;
 }

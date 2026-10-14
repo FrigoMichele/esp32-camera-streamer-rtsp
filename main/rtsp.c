@@ -67,6 +67,7 @@ struct rtsp {
     bool eth_started;
 };
 
+/** Apply the board's static IPv4 configuration after link-up. */
 static esp_err_t configure_ethernet_static_ip(rtsp_t *rtsp)
 {
     esp_err_t result = esp_netif_dhcpc_stop(rtsp->eth_netif);
@@ -81,6 +82,7 @@ static esp_err_t configure_ethernet_static_ip(rtsp_t *rtsp)
     return esp_netif_set_ip_info(rtsp->eth_netif, &ip_info);
 }
 
+/** Handle Ethernet link and IP events for this RTSP instance. */
 static void ethernet_event_handler(void *arg,
                                    esp_event_base_t event_base,
                                    int32_t event_id,
@@ -120,6 +122,7 @@ static void ethernet_event_handler(void *arg,
     }
 }
 
+/** Stop Ethernet and release its driver, glue and event resources. */
 static void stop_ethernet(rtsp_t *rtsp)
 {
     if (rtsp == NULL) {
@@ -183,6 +186,7 @@ static void stop_ethernet(rtsp_t *rtsp)
     }
 }
 
+/** Initialize Ethernet and wait until the static IP is available. */
 static esp_err_t start_ethernet(rtsp_t *rtsp)
 {
     esp_err_t result = esp_netif_init();
@@ -286,6 +290,7 @@ static esp_err_t start_ethernet(rtsp_t *rtsp)
     return ESP_OK;
 }
 
+/** Log RTSP session state changes. */
 static int rtsp_state_handler(esp_rtsp_state_t state, void *ctx)
 {
     (void)ctx;
@@ -293,6 +298,7 @@ static int rtsp_state_handler(esp_rtsp_state_t state, void *ctx)
     return ESP_OK;
 }
 
+/** Copy the newest encoded frame into the RTSP callback buffer. */
 static int rtsp_send_video(unsigned char *data,
                            unsigned int *length,
                            uint32_t *pts,
@@ -329,6 +335,7 @@ static int rtsp_send_video(unsigned char *data,
     return ESP_OK;
 }
 
+/** Stop the RTSP server and release its frame synchronization resources. */
 static void stop_rtsp_server(rtsp_t *rtsp)
 {
     if (rtsp == NULL) {

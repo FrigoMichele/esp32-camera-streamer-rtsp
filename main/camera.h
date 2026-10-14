@@ -20,23 +20,26 @@ typedef struct camera camera_t;
 typedef struct {
     uint32_t width;
     uint32_t height;
+    const char *format_name;
 } camera_config_t;
-
-/** Use this value with camera_wait_frame() to wait indefinitely. */
-#define CAMERA_WAIT_FOREVER UINT32_MAX
 
 /**
  * Create and configure the OV5647, CSI receiver and ISP pipeline.
  *
- * The current sensor mode is fixed at RAW8 800x640. The ISP output is the
- * packed YUV420 format expected by the hardware H.264 encoder.
+ * The caller supplies the sensor dimensions and format name. The ISP output
+ * is the packed YUV420 format expected by the hardware H.264 encoder.
  */
 esp_err_t camera_create(const camera_config_t *config, camera_t **out_camera);
 
 /** Start asynchronous CSI capture. */
 esp_err_t camera_start(camera_t *camera);
 
-/** Wait until the camera has completed a frame capture. */
+/**
+ * Wait until the camera has completed a frame capture.
+ *
+ * A timeout of zero polls without waiting. The function never waits
+ * indefinitely.
+ */
 esp_err_t camera_wait_frame(camera_t *camera, uint32_t timeout_ms);
 
 /**

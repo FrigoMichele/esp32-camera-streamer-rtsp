@@ -28,6 +28,7 @@ void app_main(void)
     camera_config_t camera_config = {
         .width = width,
         .height = height,
+        .format_name = "MIPI_2lane_24Minput_RAW8_800x640_50fps",
     };
     ESP_ERROR_CHECK(camera_create(&camera_config, &camera));
 
@@ -55,9 +56,16 @@ void app_main(void)
              width, height);
 
     const uint32_t frame_limit = CONFIG_H264_ENCODER_FRAME_COUNT;
+    const uint32_t frame_timeout_ms = 1000U;
     uint32_t frame_number = 0;
     while (frame_limit == 0 || frame_number < frame_limit) {
-        ESP_ERROR_CHECK(camera_wait_frame(camera, CAMERA_WAIT_FOREVER));
+        esp_err_t wait_result = camera_wait_frame(camera, frame_timeout_ms);
+        if (wait_result == ESP_ERR_TIMEOUT) {
+            ESP_LOGE(TAG, "camera frame timeout after %" PRIu32 " ms",
+                     frame_timeout_ms);
+            break;
+        }
+        ESP_ERROR_CHECK(wait_result);
 
         encoder_frame_t encoded_frame = {0};
         ESP_ERROR_CHECK(encoder_encode(encoder,

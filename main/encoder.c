@@ -25,6 +25,7 @@ struct encoder {
     bool opened;
 };
 
+/** Convert an H.264 component error to the application error type. */
 static esp_err_t h264_error_to_esp(esp_h264_err_t result)
 {
     switch (result) {
@@ -43,6 +44,7 @@ static esp_err_t h264_error_to_esp(esp_h264_err_t result)
     }
 }
 
+/** Log an H.264 operation failure. */
 static void log_h264_error(esp_h264_err_t result, const char *operation)
 {
     if (result != ESP_H264_ERR_OK) {
