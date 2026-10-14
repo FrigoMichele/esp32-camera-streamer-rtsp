@@ -109,20 +109,10 @@ dependencies:
     source:
       type: idf
     version: 5.5.2
-  sensor_init:
-    dependencies:
-    - name: espressif/esp_cam_sensor
-      version: ^1.1.0
-    - name: idf
-      version: '>=5.3.0'
-    source:
-      path: C:\Espressif\frameworks\esp-idf-v5.5.2\examples\peripherals\camera\common_components\sensor_init
-      type: local
-    version: '*'
 direct_dependencies:
+- espressif/esp_cam_sensor
 - espressif/esp_h264
 - espressif/esp_media_protocols
-- sensor_init
-manifest_hash: 448062c6dc3d99dc4015c6d961bb3e95603245b8c9257c83b0a76bef4f120a9b
+manifest_hash: f7efe156d86d8d6639822f3270d56b5fb23817cd9009645f9129c5cb2c6ba9c7
 target: esp32p4
 version: 2.0.0

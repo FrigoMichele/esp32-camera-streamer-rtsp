@@ -100,3 +100,8 @@ Set **Number of frames to capture** to zero for continuous capture.
 
 Each module exposes an opaque handle and returns `esp_err_t` for operations;
 implementation-specific ESP-IDF handles remain private to its `.c` file.
+
+## TODO
+
+- Verify the ISP transform and, more generally, the camera processing and
+  calibration for this OV5647 camera.

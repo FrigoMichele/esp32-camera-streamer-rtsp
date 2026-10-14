@@ -6,18 +6,24 @@
 
 #include "camera.h"
 
+#include <inttypes.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stdlib.h>
+#include <string.h>
 
+#include "driver/i2c_master.h"
 #include "driver/isp.h"
 #include "esp_attr.h"
 #include "esp_cam_ctlr.h"
 #include "esp_cam_ctlr_csi.h"
+#include "esp_cam_sensor.h"
+#include "esp_cam_sensor_detect.h"
 #include "esp_h264_alloc.h"
 #include "esp_ldo_regulator.h"
 #include "esp_log.h"
-#include "example_sensor_init.h"
+#include "esp_sccb_intf.h"
+#include "esp_sccb_i2c.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "sdkconfig.h"
@@ -25,12 +31,15 @@
 static const char *TAG = "camera";
 
 #define CAMERA_TRANSACTION_TIMEOUT_MS 1000U
+#define CAMERA_SCCB_FREQUENCY_HZ 10000U
 
 struct camera {
     esp_cam_ctlr_handle_t controller;
     isp_proc_handle_t isp;
     esp_ldo_channel_handle_t mipi_ldo;
-    example_sensor_handle_t sensor;
+    esp_cam_sensor_device_t *sensor;
+    i2c_master_bus_handle_t i2c_bus;
+    esp_sccb_io_handle_t sccb_io;
     SemaphoreHandle_t frame_ready;
 
     esp_cam_ctlr_trans_t transaction;
@@ -38,7 +47,6 @@ struct camera {
     size_t frame_size;
     uint32_t frame_buffer_size;
 
-    bool sensor_initialized;
     bool controller_enabled;
     bool controller_started;
     bool isp_enabled;
@@ -188,6 +196,196 @@ static bool IRAM_ATTR camera_transaction_finished(esp_cam_ctlr_handle_t handle,
     return higher_priority_task_woken == pdTRUE;
 }
 
+/** Initialize the sensor, detect it over SCCB and select its format. */
+static esp_err_t camera_sensor_init(camera_t *camera,
+                                    const camera_config_t *config)
+{
+    i2c_master_bus_config_t i2c_bus_config = {
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .sda_io_num = CONFIG_CAMERA_I2C_SDA,
+        .scl_io_num = CONFIG_CAMERA_I2C_SCL,
+        .i2c_port = I2C_NUM_0,
+        .flags.enable_internal_pullup = true,
+    };
+    esp_err_t result = i2c_new_master_bus(&i2c_bus_config, &camera->i2c_bus);
+    if (result != ESP_OK) {
+        return result;
+    }
+
+    esp_cam_sensor_config_t sensor_config = {
+        .sccb_handle = NULL,
+        .reset_pin = -1,
+        .pwdn_pin = -1,
+        .xclk_pin = -1,
+        .xclk_freq_hz = 0,
+        .sensor_port = ESP_CAM_SENSOR_MIPI_CSI,
+    };
+
+    for (esp_cam_sensor_detect_fn_t *detector =
+             &__esp_cam_sensor_detect_fn_array_start;
+         detector < &__esp_cam_sensor_detect_fn_array_end;
+         ++detector) {
+        if (detector->port != ESP_CAM_SENSOR_MIPI_CSI) {
+            continue;
+        }
+
+        sccb_i2c_config_t sccb_config = {
+            .scl_speed_hz = CAMERA_SCCB_FREQUENCY_HZ,
+            .device_address = detector->sccb_addr,
+            .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        };
+        result = sccb_new_i2c_io(camera->i2c_bus, &sccb_config,
+                                 &sensor_config.sccb_handle);
+        if (result != ESP_OK) {
+            return result;
+        }
+
+        camera->sensor = detector->detect(&sensor_config);
+        if (camera->sensor != NULL) {
+            camera->sccb_io = sensor_config.sccb_handle;
+            break;
+        }
+
+        result = esp_sccb_del_i2c_io(sensor_config.sccb_handle);
+        sensor_config.sccb_handle = NULL;
+        if (result != ESP_OK) {
+            return result;
+        }
+    }
+
+    if (camera->sensor == NULL) {
+        ESP_LOGE(TAG, "failed to detect camera sensor");
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    const char *sensor_name = esp_cam_sensor_get_name(camera->sensor);
+    if (sensor_name == NULL) {
+        sensor_name = "unknown";
+    }
+
+    esp_cam_sensor_id_t sensor_id = {0};
+    esp_err_t id_result = esp_cam_sensor_ioctl(
+        camera->sensor, ESP_CAM_SENSOR_IOC_G_CHIP_ID, &sensor_id);
+    if (id_result == ESP_OK) {
+        ESP_LOGI(TAG,
+                 "sensor detected directly: name=%s MID=0x%02x%02x "
+                 "PID=0x%04x version=0x%02x",
+                 sensor_name, (unsigned)sensor_id.midh,
+                 (unsigned)sensor_id.midl, (unsigned)sensor_id.pid,
+                 (unsigned)sensor_id.ver);
+    } else {
+        ESP_LOGW(TAG, "could not read the sensor chip ID: %s",
+                 esp_err_to_name(id_result));
+    }
+
+    esp_cam_sensor_capability_t capability = {0};
+    const bool capability_valid =
+        esp_cam_sensor_get_capability(camera->sensor, &capability) == ESP_OK;
+    if (capability_valid) {
+        ESP_LOGI(TAG,
+                 "sensor capabilities: RAW=%d RGB565=%d YUV=%d JPEG=%d",
+                 (int)capability.fmt_raw, (int)capability.fmt_rgb565,
+                 (int)capability.fmt_yuv, (int)capability.fmt_jpeg);
+    }
+
+    esp_cam_sensor_format_array_t formats = {0};
+    result = esp_cam_sensor_query_format(camera->sensor, &formats);
+    if (result != ESP_OK || formats.format_array == NULL || formats.count == 0) {
+        ESP_LOGE(TAG, "failed to query sensor formats: %s",
+                 esp_err_to_name(result));
+        return result != ESP_OK ? result : ESP_ERR_NOT_FOUND;
+    }
+
+    const esp_cam_sensor_format_t *selected_format = NULL;
+    for (uint32_t index = 0; index < formats.count; ++index) {
+        const esp_cam_sensor_format_t *format = &formats.format_array[index];
+        ESP_LOGI(TAG, "sensor format[%" PRIu32 "]: %s", index,
+                 format->name != NULL ? format->name : "unknown");
+        if (format->name != NULL &&
+            strcmp(format->name, config->format_name) == 0) {
+            selected_format = format;
+        }
+    }
+
+    if (selected_format == NULL) {
+        ESP_LOGE(TAG, "unsupported sensor format: %s", config->format_name);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    result = esp_cam_sensor_set_format(camera->sensor, selected_format);
+    if (result != ESP_OK) {
+        ESP_LOGE(TAG, "failed to set sensor format %s: %s",
+                 selected_format->name, esp_err_to_name(result));
+        return result;
+    }
+
+    esp_cam_sensor_format_t active_format = {0};
+    const bool active_format_valid =
+        esp_cam_sensor_get_format(camera->sensor, &active_format) == ESP_OK;
+    if (active_format_valid) {
+        ESP_LOGI(TAG,
+                 "sensor format in use: %s, %ux%u @ %u fps, "
+                 "interface=%d lanes=%" PRIu32,
+                 active_format.name != NULL ? active_format.name : "unknown",
+                 (unsigned)active_format.width, (unsigned)active_format.height,
+                 (unsigned)active_format.fps, (int)active_format.port,
+                 active_format.mipi_info.lane_num);
+    }
+
+    int stream_enabled = 1;
+    result = esp_cam_sensor_ioctl(camera->sensor,
+                                  ESP_CAM_SENSOR_IOC_S_STREAM,
+                                  &stream_enabled);
+    if (result != ESP_OK) {
+        ESP_LOGE(TAG, "failed to start sensor stream: %s",
+                 esp_err_to_name(result));
+    }
+    return result;
+}
+
+/** Stop the sensor and release its SCCB and I2C resources. */
+static void camera_sensor_deinit(camera_t *camera)
+{
+    if (camera == NULL) {
+        return;
+    }
+
+    if (camera->sensor != NULL) {
+        int stream_enabled = 0;
+        esp_err_t result = esp_cam_sensor_ioctl(
+            camera->sensor, ESP_CAM_SENSOR_IOC_S_STREAM, &stream_enabled);
+        if (result != ESP_OK) {
+            ESP_LOGW(TAG, "failed to stop sensor stream: %s",
+                     esp_err_to_name(result));
+        }
+
+        result = esp_cam_sensor_del_dev(camera->sensor);
+        if (result != ESP_OK) {
+            ESP_LOGW(TAG, "failed to delete sensor device: %s",
+                     esp_err_to_name(result));
+        }
+        camera->sensor = NULL;
+    }
+
+    if (camera->sccb_io != NULL) {
+        esp_err_t result = esp_sccb_del_i2c_io(camera->sccb_io);
+        if (result != ESP_OK) {
+            ESP_LOGW(TAG, "failed to delete SCCB interface: %s",
+                     esp_err_to_name(result));
+        }
+        camera->sccb_io = NULL;
+    }
+
+    if (camera->i2c_bus != NULL) {
+        esp_err_t result = i2c_del_master_bus(camera->i2c_bus);
+        if (result != ESP_OK) {
+            ESP_LOGW(TAG, "failed to delete I2C bus: %s",
+                     esp_err_to_name(result));
+        }
+        camera->i2c_bus = NULL;
+    }
+}
+
 /** Release initialized camera resources without freeing the camera object. */
 static void camera_release_partial(camera_t *camera)
 {
@@ -240,10 +438,7 @@ static void camera_release_partial(camera_t *camera)
         camera->isp = NULL;
     }
 
-    if (camera->sensor_initialized) {
-        example_sensor_deinit(camera->sensor);
-        camera->sensor_initialized = false;
-    }
+    camera_sensor_deinit(camera);
 
     if (camera->mipi_ldo != NULL) {
         esp_err_t result = esp_ldo_release_channel(camera->mipi_ldo);
@@ -319,15 +514,12 @@ esp_err_t camera_create(const camera_config_t *config, camera_t **out_camera)
         return ESP_ERR_NO_MEM;
     }
 
-    example_sensor_config_t sensor_config = {
-        .i2c_port_num = I2C_NUM_0,
-        .i2c_sda_io_num = CONFIG_CAMERA_I2C_SDA,
-        .i2c_scl_io_num = CONFIG_CAMERA_I2C_SCL,
-        .port = ESP_CAM_SENSOR_MIPI_CSI,
-        .format_name = config->format_name,
-    };
-    example_sensor_init(&sensor_config, &camera->sensor);
-    camera->sensor_initialized = true;
+    result = camera_sensor_init(camera, config);
+    if (result != ESP_OK) {
+        camera_release_partial(camera);
+        free(camera);
+        return result;
+    }
 
     esp_cam_ctlr_csi_config_t csi_config = {
         .ctlr_id = 0,
