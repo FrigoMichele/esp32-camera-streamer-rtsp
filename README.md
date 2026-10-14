@@ -32,9 +32,9 @@ The server uses Espressif's `esp_media_protocols` component. Encoded frames
 are copied from the H.264 encoder into the RTSP callback buffer. Use VLC or
 `ffplay` to open the URL.
 
-The RTSP module configures the internal EMAC and IP101 PHY on the ESP32-P4
-Function EV Board, then assigns the static Ethernet settings below before
-starting the server:
+The application passes the endpoint and static Ethernet settings through
+`rtsp_config.network`; the RTSP module then configures the internal EMAC and
+IP101 PHY on the ESP32-P4 Function EV Board:
 
 | Setting | Value |
 |---|---|

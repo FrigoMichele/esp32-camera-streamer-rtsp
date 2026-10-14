@@ -48,6 +48,14 @@ void app_main(void)
         .height = height,
         .fps = CONFIG_H264_ENCODER_FPS,
         .max_frame_size = frame_size,
+        .network = {
+            .server_port = 8554,
+            .server_address = "192.168.2.5",
+            .server_uri = "rtsp://192.168.2.5:8554/live",
+            .netmask = "255.255.255.0",
+            .gateway = "192.168.2.1",
+            .connect_timeout_ms = 10000U,
+        },
     };
     ESP_ERROR_CHECK(rtsp_create(&rtsp_config, &rtsp));
     ESP_ERROR_CHECK(camera_start(camera));

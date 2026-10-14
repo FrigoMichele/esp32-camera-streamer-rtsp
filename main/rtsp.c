@@ -6,6 +6,7 @@
 
 #include "rtsp.h"
 
+#include <inttypes.h>
 #include <limits.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -22,13 +23,6 @@
 #include "media_lib_adapter.h"
 
 static const char *TAG = "rtsp";
-
-#define RTSP_SERVER_PORT 8554
-#define RTSP_SERVER_ADDRESS "192.168.2.5"
-#define RTSP_SERVER_URI "rtsp://" RTSP_SERVER_ADDRESS ":8554/live"
-#define RTSP_SERVER_NETMASK "255.255.255.0"
-#define RTSP_SERVER_GATEWAY "192.168.2.1"
-#define RTSP_CONNECT_TIMEOUT_MS 10000
 
 /* ESP32-P4 Function EV Board Ethernet (IP101, RMII). */
 #define ETHERNET_PHY_ADDR 1
@@ -50,6 +44,7 @@ struct rtsp {
     size_t frame_capacity;
     size_t frame_length;
     uint32_t frame_pts;
+    rtsp_network_config_t network;
 
     esp_rtsp_handle_t server;
     esp_rtsp_video_info_t video_info;
@@ -67,7 +62,13 @@ struct rtsp {
     bool eth_started;
 };
 
-/** Apply the board's static IPv4 configuration after link-up. */
+/** Return whether a configuration string is present and non-empty. */
+static bool rtsp_string_is_valid(const char *value)
+{
+    return value != NULL && value[0] != '\0';
+}
+
+/** Apply the configured static IPv4 configuration after link-up. */
 static esp_err_t configure_ethernet_static_ip(rtsp_t *rtsp)
 {
     esp_err_t result = esp_netif_dhcpc_stop(rtsp->eth_netif);
@@ -76,9 +77,9 @@ static esp_err_t configure_ethernet_static_ip(rtsp_t *rtsp)
     }
 
     esp_netif_ip_info_t ip_info = {0};
-    ip_info.ip.addr = esp_ip4addr_aton(RTSP_SERVER_ADDRESS);
-    ip_info.netmask.addr = esp_ip4addr_aton(RTSP_SERVER_NETMASK);
-    ip_info.gw.addr = esp_ip4addr_aton(RTSP_SERVER_GATEWAY);
+    ip_info.ip.addr = esp_ip4addr_aton(rtsp->network.server_address);
+    ip_info.netmask.addr = esp_ip4addr_aton(rtsp->network.netmask);
+    ip_info.gw.addr = esp_ip4addr_aton(rtsp->network.gateway);
     return esp_netif_set_ip_info(rtsp->eth_netif, &ip_info);
 }
 
@@ -280,9 +281,10 @@ static esp_err_t start_ethernet(rtsp_t *rtsp)
     rtsp->eth_started = true;
 
     if (xSemaphoreTake(rtsp->eth_ip_ready,
-                       pdMS_TO_TICKS(RTSP_CONNECT_TIMEOUT_MS)) != pdTRUE) {
-        ESP_LOGE(TAG, "Ethernet did not obtain %s within %d ms",
-                 RTSP_SERVER_ADDRESS, RTSP_CONNECT_TIMEOUT_MS);
+                       pdMS_TO_TICKS(rtsp->network.connect_timeout_ms)) != pdTRUE) {
+        ESP_LOGE(TAG, "Ethernet did not obtain %s within %" PRIu32 " ms",
+                 rtsp->network.server_address,
+                 rtsp->network.connect_timeout_ms);
         stop_ethernet(rtsp);
         return ESP_ERR_TIMEOUT;
     }
@@ -367,7 +369,13 @@ esp_err_t rtsp_create(const rtsp_config_t *config, rtsp_t **out_rtsp)
     if (config == NULL || out_rtsp == NULL || config->width == 0 ||
         config->height == 0 || config->fps == 0 ||
         config->max_frame_size == 0 || config->max_frame_size > UINT_MAX ||
-        config->max_frame_size > INT_MAX) {
+        config->max_frame_size > INT_MAX ||
+        config->network.server_port == 0 ||
+        config->network.connect_timeout_ms == 0 ||
+        !rtsp_string_is_valid(config->network.server_address) ||
+        !rtsp_string_is_valid(config->network.server_uri) ||
+        !rtsp_string_is_valid(config->network.netmask) ||
+        !rtsp_string_is_valid(config->network.gateway)) {
         return ESP_ERR_INVALID_ARG;
     }
     *out_rtsp = NULL;
@@ -376,6 +384,7 @@ esp_err_t rtsp_create(const rtsp_config_t *config, rtsp_t **out_rtsp)
     if (rtsp == NULL) {
         return ESP_ERR_NO_MEM;
     }
+    rtsp->network = config->network;
 
     esp_err_t result = media_lib_add_default_adapter();
     if (result != ESP_OK) {
@@ -408,9 +417,9 @@ esp_err_t rtsp_create(const rtsp_config_t *config, rtsp_t **out_rtsp)
         .ctx = rtsp,
         .video_enable = true,
         .audio_enable = false,
-        .uri = RTSP_SERVER_URI,
-        .local_port = RTSP_SERVER_PORT,
-        .local_addr = RTSP_SERVER_ADDRESS,
+        .uri = rtsp->network.server_uri,
+        .local_port = (int)rtsp->network.server_port,
+        .local_addr = rtsp->network.server_address,
         .stack_size = 4096,
         .task_prio = 5,
         .mode = RTSP_SERVER,
@@ -435,7 +444,7 @@ esp_err_t rtsp_create(const rtsp_config_t *config, rtsp_t **out_rtsp)
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "RTSP server listening on %s", RTSP_SERVER_URI);
+    ESP_LOGI(TAG, "RTSP server listening on %s", rtsp->network.server_uri);
     *out_rtsp = rtsp;
     return ESP_OK;
 }
