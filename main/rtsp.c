@@ -6,7 +6,6 @@
 
 #include "rtsp.h"
 
-#include <inttypes.h>
 #include <limits.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -18,8 +17,6 @@
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_rtsp.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/semphr.h"
 #include "media_lib_adapter.h"
 
 static const char *TAG = "rtsp";
@@ -37,13 +34,12 @@ static const char *TAG = "rtsp";
 #define ETHERNET_RMII_RXD0_GPIO 29
 #define ETHERNET_RMII_RXD1_GPIO 30
 
+/* Intermediate test: publisher and callback intentionally share unprotected data. */
 struct rtsp {
-    SemaphoreHandle_t mutex;
-    SemaphoreHandle_t frame_ready;
     uint8_t *latest_frame;
-    size_t frame_capacity;
     size_t frame_length;
     uint32_t frame_pts;
+    size_t frame_capacity;
     rtsp_network_config_t network;
 
     esp_rtsp_handle_t server;
@@ -56,7 +52,6 @@ struct rtsp {
     esp_eth_phy_t *eth_phy;
     esp_eth_netif_glue_handle_t eth_glue;
     esp_netif_t *eth_netif;
-    SemaphoreHandle_t eth_ip_ready;
     bool eth_event_registered;
     bool ip_event_registered;
     bool eth_started;
@@ -116,9 +111,6 @@ static void ethernet_event_handler(void *arg,
         const ip_event_got_ip_t *event = event_data;
         if (event != NULL) {
             ESP_LOGI(TAG, "Ethernet IP: " IPSTR, IP2STR(&event->ip_info.ip));
-        }
-        if (rtsp->eth_ip_ready != NULL) {
-            xSemaphoreGive(rtsp->eth_ip_ready);
         }
     }
 }
@@ -181,13 +173,9 @@ static void stop_ethernet(rtsp_t *rtsp)
         rtsp->eth_netif = NULL;
     }
 
-    if (rtsp->eth_ip_ready != NULL) {
-        vSemaphoreDelete(rtsp->eth_ip_ready);
-        rtsp->eth_ip_ready = NULL;
-    }
 }
 
-/** Initialize Ethernet and wait until the static IP is available. */
+/** Start Ethernet without waiting for link or IP readiness. */
 static esp_err_t start_ethernet(rtsp_t *rtsp)
 {
     esp_err_t result = esp_netif_init();
@@ -198,11 +186,6 @@ static esp_err_t start_ethernet(rtsp_t *rtsp)
     result = esp_event_loop_create_default();
     if (result != ESP_OK && result != ESP_ERR_INVALID_STATE) {
         return result;
-    }
-
-    rtsp->eth_ip_ready = xSemaphoreCreateBinary();
-    if (rtsp->eth_ip_ready == NULL) {
-        return ESP_ERR_NO_MEM;
     }
 
     eth_mac_config_t mac_config = ETH_MAC_DEFAULT_CONFIG();
@@ -280,15 +263,6 @@ static esp_err_t start_ethernet(rtsp_t *rtsp)
     }
     rtsp->eth_started = true;
 
-    if (xSemaphoreTake(rtsp->eth_ip_ready,
-                       pdMS_TO_TICKS(rtsp->network.connect_timeout_ms)) != pdTRUE) {
-        ESP_LOGE(TAG, "Ethernet did not obtain %s within %" PRIu32 " ms",
-                 rtsp->network.server_address,
-                 rtsp->network.connect_timeout_ms);
-        stop_ethernet(rtsp);
-        return ESP_ERR_TIMEOUT;
-    }
-
     return ESP_OK;
 }
 
@@ -300,44 +274,28 @@ static int rtsp_state_handler(esp_rtsp_state_t state, void *ctx)
     return ESP_OK;
 }
 
-/** Copy the newest encoded frame into the RTSP callback buffer. */
+/** Copy shared data immediately, without waiting or protecting against publish. */
 static int rtsp_send_video(unsigned char *data,
                            unsigned int *length,
                            uint32_t *pts,
                            void *ctx)
 {
     rtsp_t *rtsp = ctx;
-    if (rtsp == NULL || data == NULL || length == NULL || pts == NULL ||
-        rtsp->frame_ready == NULL || rtsp->mutex == NULL) {
+    if (rtsp == NULL || data == NULL || length == NULL || pts == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
-
-    /* The RTSP task asks for a frame when the client is in PLAY state. */
-    if (xSemaphoreTake(rtsp->frame_ready, pdMS_TO_TICKS(1000)) != pdTRUE) {
-        *length = 0;
-        return ESP_ERR_TIMEOUT;
-    }
-
-    if (xSemaphoreTake(rtsp->mutex, portMAX_DELAY) != pdTRUE) {
-        *length = 0;
-        return ESP_FAIL;
-    }
-
-    if (rtsp->frame_length > rtsp->frame_capacity ||
-        rtsp->latest_frame == NULL) {
-        xSemaphoreGive(rtsp->mutex);
-        *length = 0;
+    const size_t frame_length = rtsp->frame_length;
+    *length = 0;
+    if (frame_length > rtsp->frame_capacity || rtsp->latest_frame == NULL) {
         return ESP_ERR_INVALID_SIZE;
     }
-
-    memcpy(data, rtsp->latest_frame, rtsp->frame_length);
-    *length = (unsigned int)rtsp->frame_length;
+    memcpy(data, rtsp->latest_frame, frame_length);
+    *length = (unsigned int)frame_length;
     *pts = rtsp->frame_pts;
-    xSemaphoreGive(rtsp->mutex);
     return ESP_OK;
 }
 
-/** Stop the RTSP server and release its frame synchronization resources. */
+/** Stop the server and free the shared test buffer. */
 static void stop_rtsp_server(rtsp_t *rtsp)
 {
     if (rtsp == NULL) {
@@ -352,14 +310,6 @@ static void stop_rtsp_server(rtsp_t *rtsp)
         rtsp->server = NULL;
     }
 
-    if (rtsp->frame_ready != NULL) {
-        vSemaphoreDelete(rtsp->frame_ready);
-        rtsp->frame_ready = NULL;
-    }
-    if (rtsp->mutex != NULL) {
-        vSemaphoreDelete(rtsp->mutex);
-        rtsp->mutex = NULL;
-    }
     free(rtsp->latest_frame);
     rtsp->latest_frame = NULL;
 }
@@ -371,7 +321,6 @@ esp_err_t rtsp_create(const rtsp_config_t *config, rtsp_t **out_rtsp)
         config->max_frame_size == 0 || config->max_frame_size > UINT_MAX ||
         config->max_frame_size > INT_MAX ||
         config->network.server_port == 0 ||
-        config->network.connect_timeout_ms == 0 ||
         !rtsp_string_is_valid(config->network.server_address) ||
         !rtsp_string_is_valid(config->network.server_uri) ||
         !rtsp_string_is_valid(config->network.netmask) ||
@@ -392,13 +341,9 @@ esp_err_t rtsp_create(const rtsp_config_t *config, rtsp_t **out_rtsp)
         return result;
     }
 
-    rtsp->latest_frame = malloc(config->max_frame_size);
     rtsp->frame_capacity = config->max_frame_size;
-    rtsp->mutex = xSemaphoreCreateMutex();
-    rtsp->frame_ready = xSemaphoreCreateBinary();
-    if (rtsp->latest_frame == NULL || rtsp->mutex == NULL ||
-        rtsp->frame_ready == NULL) {
-        stop_rtsp_server(rtsp);
+    rtsp->latest_frame = malloc(config->max_frame_size);
+    if (rtsp->latest_frame == NULL) {
         free(rtsp);
         return ESP_ERR_NO_MEM;
     }
@@ -457,22 +402,13 @@ esp_err_t rtsp_publish(rtsp_t *rtsp,
     if (rtsp == NULL || data == NULL || length == 0) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (length > rtsp->frame_capacity || rtsp->latest_frame == NULL ||
-        rtsp->mutex == NULL || rtsp->frame_ready == NULL) {
+    if (length > rtsp->frame_capacity) {
         return ESP_ERR_INVALID_SIZE;
-    }
-
-    if (xSemaphoreTake(rtsp->mutex, portMAX_DELAY) != pdTRUE) {
-        return ESP_FAIL;
     }
 
     memcpy(rtsp->latest_frame, data, length);
     rtsp->frame_length = length;
     rtsp->frame_pts = pts;
-    xSemaphoreGive(rtsp->mutex);
-
-    /* A binary semaphore is enough: the callback always copies the newest frame. */
-    (void)xSemaphoreGive(rtsp->frame_ready);
     return ESP_OK;
 }
 

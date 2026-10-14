@@ -28,7 +28,6 @@ typedef struct {
     const char *server_uri;
     const char *netmask;
     const char *gateway;
-    uint32_t connect_timeout_ms;
 } rtsp_network_config_t;
 
 typedef struct {
@@ -39,21 +38,24 @@ typedef struct {
     rtsp_network_config_t network;
 } rtsp_config_t;
 
-/** Start Ethernet and an H.264 RTSP server. */
+/** Start Ethernet and RTSP immediately, without waiting for link/IP readiness. */
 esp_err_t rtsp_create(const rtsp_config_t *config, rtsp_t **out_rtsp);
 
 /**
  * Publish one encoded access unit.
  *
  * The data is copied before this function returns, so the caller may reuse
- * its encoder buffer immediately afterwards.
+ * its encoder buffer immediately afterwards. The shared RTSP copy has NO
+ * synchronization: callbacks may see mixed bytes, length and PTS, repeat the
+ * same access unit, or return zero bytes before the first publish.
+ * This is an intentionally unsafe intermediate test, not production code.
  */
 esp_err_t rtsp_publish(rtsp_t *rtsp,
                        const uint8_t *data,
                        size_t length,
                        uint32_t pts);
 
-/** Stop the server and release Ethernet and RTSP resources. */
+/** Stop the server and release resources; caller must first stop publishing. */
 void rtsp_destroy(rtsp_t *rtsp);
 
 #ifdef __cplusplus

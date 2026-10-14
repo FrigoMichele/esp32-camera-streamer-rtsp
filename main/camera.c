@@ -24,13 +24,10 @@
 #include "esp_log.h"
 #include "esp_sccb_intf.h"
 #include "esp_sccb_i2c.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/semphr.h"
 #include "sdkconfig.h"
 
 static const char *TAG = "camera";
 
-#define CAMERA_TRANSACTION_TIMEOUT_MS 1000U
 #define CAMERA_SCCB_FREQUENCY_HZ 10000U
 #define CAMERA_CSI_LANE_COUNT 2
 
@@ -41,7 +38,6 @@ struct camera {
     esp_cam_sensor_device_t *sensor;
     i2c_master_bus_handle_t i2c_bus;
     esp_sccb_io_handle_t sccb_io;
-    SemaphoreHandle_t frame_ready;
 
     esp_cam_ctlr_trans_t transaction;
     uint8_t *frame_buffer;
@@ -162,14 +158,14 @@ static esp_err_t configure_isp(isp_proc_handle_t isp)
     return esp_isp_color_enable(isp);
 }
 
-/** Give the CSI controller the camera module's reusable frame buffer. */
+/** Reuse the same YUV buffer continuously; intentionally no reader protection. */
 static bool IRAM_ATTR camera_get_new_buffer(esp_cam_ctlr_handle_t handle,
                                             esp_cam_ctlr_trans_t *transaction,
                                             void *user_data)
 {
     (void)handle;
 
-    const camera_t *camera = user_data;
+    camera_t *camera = user_data;
     if (camera == NULL || transaction == NULL) {
         return false;
     }
@@ -179,22 +175,15 @@ static bool IRAM_ATTR camera_get_new_buffer(esp_cam_ctlr_handle_t handle,
     return false;
 }
 
-/** Notify the application task that one frame has been captured. */
+/** Required CSI completion callback; intentionally does not notify any task. */
 static bool IRAM_ATTR camera_transaction_finished(esp_cam_ctlr_handle_t handle,
                                                   esp_cam_ctlr_trans_t *transaction,
                                                   void *user_data)
 {
     (void)handle;
     (void)transaction;
-
-    camera_t *camera = user_data;
-    if (camera == NULL || camera->frame_ready == NULL) {
-        return false;
-    }
-
-    BaseType_t higher_priority_task_woken = pdFALSE;
-    xSemaphoreGiveFromISR(camera->frame_ready, &higher_priority_task_woken);
-    return higher_priority_task_woken == pdTRUE;
+    (void)user_data;
+    return false;
 }
 
 /** Initialize the sensor, detect it over SCCB and select its format. */
@@ -449,11 +438,6 @@ static void camera_release_partial(camera_t *camera)
         camera->mipi_ldo = NULL;
     }
 
-    if (camera->frame_ready != NULL) {
-        vSemaphoreDelete(camera->frame_ready);
-        camera->frame_ready = NULL;
-    }
-
     if (camera->frame_buffer != NULL) {
         esp_h264_free(camera->frame_buffer);
         camera->frame_buffer = NULL;
@@ -507,13 +491,6 @@ esp_err_t camera_create(const camera_config_t *config, camera_t **out_camera)
         return ESP_ERR_NO_MEM;
     }
     camera->frame_size = frame_size;
-
-    camera->frame_ready = xSemaphoreCreateBinary();
-    if (camera->frame_ready == NULL) {
-        camera_release_partial(camera);
-        free(camera);
-        return ESP_ERR_NO_MEM;
-    }
 
     result = camera_sensor_init(camera, config);
     if (result != ESP_OK) {
@@ -617,39 +594,7 @@ esp_err_t camera_start(camera_t *camera)
     }
     camera->controller_started = true;
 
-    result = esp_cam_ctlr_receive(camera->controller, &camera->transaction,
-                                  CAMERA_TRANSACTION_TIMEOUT_MS);
-    if (result != ESP_OK) {
-        (void)esp_cam_ctlr_stop(camera->controller);
-        camera->controller_started = false;
-        return result;
-    }
-
     return ESP_OK;
-}
-
-/** Convert milliseconds to a bounded, finite FreeRTOS timeout. */
-static TickType_t camera_timeout_ticks(uint32_t timeout_ms)
-{
-    uint64_t ticks = ((uint64_t)timeout_ms * configTICK_RATE_HZ + 999U) /
-                     1000U;
-    if (ticks >= (uint64_t)portMAX_DELAY) {
-        /* Never pass portMAX_DELAY: FreeRTOS may interpret it as forever. */
-        ticks = (uint64_t)portMAX_DELAY - 1U;
-    }
-    return (TickType_t)ticks;
-}
-
-esp_err_t camera_wait_frame(camera_t *camera, uint32_t timeout_ms)
-{
-    if (camera == NULL || camera->frame_ready == NULL) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    return xSemaphoreTake(camera->frame_ready,
-                          camera_timeout_ticks(timeout_ms)) == pdTRUE
-               ? ESP_OK
-               : ESP_ERR_TIMEOUT;
 }
 
 const uint8_t *camera_frame(const camera_t *camera)

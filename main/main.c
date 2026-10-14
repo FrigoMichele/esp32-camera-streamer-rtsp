@@ -54,7 +54,6 @@ void app_main(void)
             .server_uri = "rtsp://192.168.2.5:8554/live",
             .netmask = "255.255.255.0",
             .gateway = "192.168.2.1",
-            .connect_timeout_ms = 10000U,
         },
     };
     ESP_ERROR_CHECK(rtsp_create(&rtsp_config, &rtsp));
@@ -63,18 +62,11 @@ void app_main(void)
     ESP_LOGI(TAG, "capturing OV5647 %" PRIu32 "x%" PRIu32 " frames",
              width, height);
 
+    ESP_LOGW(TAG, "UNSYNCHRONIZED TEST: frames may be torn, stale or repeated");
     const uint32_t frame_limit = CONFIG_H264_ENCODER_FRAME_COUNT;
-    const uint32_t frame_timeout_ms = 1000U;
     uint32_t frame_number = 0;
     while (frame_limit == 0 || frame_number < frame_limit) {
-        esp_err_t wait_result = camera_wait_frame(camera, frame_timeout_ms);
-        if (wait_result == ESP_ERR_TIMEOUT) {
-            ESP_LOGE(TAG, "camera frame timeout after %" PRIu32 " ms",
-                     frame_timeout_ms);
-            break;
-        }
-        ESP_ERROR_CHECK(wait_result);
-
+        /* Intermediate test: encode whatever CSI is writing, with no frame wait. */
         encoder_frame_t encoded_frame = {0};
         ESP_ERROR_CHECK(encoder_encode(encoder,
                                        camera_frame(camera),

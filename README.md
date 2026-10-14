@@ -90,7 +90,7 @@ Set **Number of frames to capture** to zero for continuous capture.
 
 ## Module layout
 
-- `camera.h/.c`: OV5647, MIPI-CSI capture, frame synchronization and all ISP
+- `camera.h/.c`: OV5647, unsynchronized MIPI-CSI capture and all ISP
   correction (demosaic, denoising, gamma, color correction matrix and color
   controls).
 - `encoder.h/.c`: opaque hardware H.264 encoder and reusable output buffer.
@@ -103,5 +103,8 @@ implementation-specific ESP-IDF handles remain private to its `.c` file.
 
 ## TODO
 
+- Reintroduce and test camera completion, buffer ownership, RTSP hand-off and
+  Ethernet readiness separately, step by step.
+- Measure actual frame cadence, PSRAM headroom and reconnect/slow-client behavior.
 - Verify the ISP transform and, more generally, the camera processing and
   calibration for this OV5647 camera.

@@ -35,18 +35,11 @@ esp_err_t camera_create(const camera_config_t *config, camera_t **out_camera);
 esp_err_t camera_start(camera_t *camera);
 
 /**
- * Wait until the camera has completed a frame capture.
- *
- * A timeout of zero polls without waiting. The function never waits
- * indefinitely.
- */
-esp_err_t camera_wait_frame(camera_t *camera, uint32_t timeout_ms);
-
-/**
- * Return the most recently captured YUV frame.
+ * Return the live YUV buffer without waiting for a complete frame.
  *
  * The pointer remains owned by the camera and is valid until the camera is
- * destroyed. The next capture may overwrite its contents.
+ * destroyed. CSI continuously overwrites it, even while the caller reads it.
+ * This unsynchronized intermediate test can return incomplete/torn frames.
  */
 const uint8_t *camera_frame(const camera_t *camera);
 
