@@ -3,20 +3,20 @@ menu "ESP32-P4 Camera and H.264 Encoder"
     config H264_ENCODER_WIDTH
         int "Camera and encoder width"
         range 80 1920
-        default 800
+        default 1920
         help
-            OV5647 capture width. The selected sensor format is 800 pixels wide.
+            OV5647 capture width. The selected sensor format is 1920 pixels wide.
 
     config H264_ENCODER_HEIGHT
         int "Camera and encoder height"
         range 80 1080
-        default 640
+        default 1080
         help
-            OV5647 capture height. The selected sensor format is 640 pixels high.
+            OV5647 capture height. The selected sensor format is 1080 pixels high.
 
     config H264_ENCODER_FPS
         int "Encoder frame rate"
-        range 1 50
+        range 30 30
         default 30
 
     config H264_ENCODER_BITRATE
@@ -64,6 +64,6 @@ menu "ESP32-P4 Camera and H.264 Encoder"
     config CAMERA_MIPI_LANE_BITRATE
         int "CSI lane bitrate (Mbps)"
         range 80 2500
-        default 200
+        default 408
 
 endmenu

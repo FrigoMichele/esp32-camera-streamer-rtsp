@@ -32,6 +32,7 @@ static const char *TAG = "camera";
 
 #define CAMERA_TRANSACTION_TIMEOUT_MS 1000U
 #define CAMERA_SCCB_FREQUENCY_HZ 10000U
+#define CAMERA_CSI_LANE_COUNT 2
 
 struct camera {
     esp_cam_ctlr_handle_t controller;
@@ -526,9 +527,9 @@ esp_err_t camera_create(const camera_config_t *config, camera_t **out_camera)
         .h_res = config->width,
         .v_res = config->height,
         .lane_bit_rate_mbps = CONFIG_CAMERA_MIPI_LANE_BITRATE,
-        .input_data_color_type = CAM_CTLR_COLOR_RAW8,
+        .input_data_color_type = CAM_CTLR_COLOR_RAW10,
         .output_data_color_type = CAM_CTLR_COLOR_YUV420,
-        .data_lane_num = 2,
+        .data_lane_num = CAMERA_CSI_LANE_COUNT,
         .byte_swap_en = false,
         .queue_items = 1,
     };
@@ -564,7 +565,7 @@ esp_err_t camera_create(const camera_config_t *config, camera_t **out_camera)
     esp_isp_processor_cfg_t isp_config = {
         .clk_hz = 80 * 1000 * 1000,
         .input_data_source = ISP_INPUT_DATA_SOURCE_CSI,
-        .input_data_color_type = ISP_COLOR_RAW8,
+        .input_data_color_type = ISP_COLOR_RAW10,
         .output_data_color_type = ISP_COLOR_YUV420,
         .yuv_range = ISP_COLOR_RANGE_FULL,
         .yuv_std = ISP_YUV_CONV_STD_BT601,

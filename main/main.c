@@ -28,7 +28,7 @@ void app_main(void)
     camera_config_t camera_config = {
         .width = width,
         .height = height,
-        .format_name = "MIPI_2lane_24Minput_RAW8_800x640_50fps",
+        .format_name = "MIPI_2lane_24Minput_RAW10_1920x1080_30fps",
     };
     ESP_ERROR_CHECK(camera_create(&camera_config, &camera));
 

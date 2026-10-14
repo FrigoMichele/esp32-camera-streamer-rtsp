@@ -8,7 +8,7 @@ sensor and a two-lane MIPI-CSI2 interface.
 The application:
 
 1. Detects and configures the OV5647 over I2C/SCCB.
-2. Captures 800x640 RAW8 frames over MIPI-CSI2.
+2. Captures 1920x1080 RAW10 frames at 30 FPS over MIPI-CSI2.
 3. Uses the ESP32-P4 ISP to convert them to YUV420.
 4. Encodes each frame with the ESP32-P4 hardware H.264 encoder.
 5. Publishes encoded H.264 access units to the RTSP module.
@@ -82,9 +82,9 @@ idf.py menuconfig
 ```
 
 The application currently passes
-`MIPI_2lane_24Minput_RAW8_800x640_50fps` as `camera_config.format_name` in
-`main/main.c`. Keep the configured resolution matched to the selected sensor
-format.
+`MIPI_2lane_24Minput_RAW10_1920x1080_30fps` as
+`camera_config.format_name` in `main/main.c`. Keep the configured resolution
+matched to the selected sensor format.
 
 Set **Number of frames to capture** to zero for continuous capture.
 
