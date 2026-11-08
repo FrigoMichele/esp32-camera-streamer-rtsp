@@ -34,7 +34,7 @@ static const char *TAG = "rtsp";
 #define ETHERNET_RMII_RXD0_GPIO 29
 #define ETHERNET_RMII_RXD1_GPIO 30
 
-/* Intermediate test: publisher and callback intentionally share unprotected data. */
+/* Latest encoded frame and its metadata (currently unsynchronized). */
 struct rtsp {
     uint8_t *latest_frame;
     size_t frame_length;
@@ -295,13 +295,15 @@ static int rtsp_send_video(unsigned char *data,
     return ESP_OK;
 }
 
-/** Stop the server and free the shared test buffer. */
+/** Stop callbacks before freeing the shared buffer. */
 static void stop_rtsp_server(rtsp_t *rtsp)
 {
     if (rtsp == NULL) {
         return;
     }
 
+    /* Lifecycle ordering: caller has already stopped publishing. Stop the
+     * RTSP worker/callbacks before deleting anything they might access. */
     if (rtsp->server != NULL) {
         int result = esp_rtsp_server_stop(rtsp->server);
         if (result != ESP_OK) {

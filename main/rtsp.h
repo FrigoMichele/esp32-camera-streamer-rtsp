@@ -44,11 +44,14 @@ esp_err_t rtsp_create(const rtsp_config_t *config, rtsp_t **out_rtsp);
 /**
  * Publish one encoded access unit.
  *
- * The data is copied before this function returns, so the caller may reuse
- * its encoder buffer immediately afterwards. The shared RTSP copy has NO
- * synchronization: callbacks may see mixed bytes, length and PTS, repeat the
- * same access unit, or return zero bytes before the first publish.
- * This is an intentionally unsafe intermediate test, not production code.
+ * The data is transferred by AXI-GDMA before this function returns, so the
+ * caller may reuse its encoder buffer immediately afterwards. A mutex protects
+ * the shared frame bytes, length and PTS during publication and RTSP transfers.
+ * Calls block until DMA completes; DMA errors are returned without a CPU-copy
+ * fallback. Buffers must satisfy the IDF DMA driver's memory/alignment rules.
+ * Callbacks return zero bytes before the first publish and may repeat the
+ * latest access unit; this is a
+ * latest-frame buffer, not a queue.
  */
 esp_err_t rtsp_publish(rtsp_t *rtsp,
                        const uint8_t *data,

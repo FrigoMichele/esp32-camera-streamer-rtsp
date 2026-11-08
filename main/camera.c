@@ -170,6 +170,8 @@ static bool IRAM_ATTR camera_get_new_buffer(esp_cam_ctlr_handle_t handle,
         return false;
     }
 
+    /* No ownership handoff: CSI immediately reuses this single buffer even
+     * if the application/encoder is still reading the previous frame. */
     transaction->buffer = camera->transaction.buffer;
     transaction->buflen = camera->transaction.buflen;
     return false;

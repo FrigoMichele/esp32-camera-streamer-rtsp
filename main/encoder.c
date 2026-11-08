@@ -146,6 +146,9 @@ esp_err_t encoder_encode(encoder_t *encoder,
         },
     };
 
+    /* Synchronous API: output is consumed only after this call returns.
+     * The input pointer is the live camera buffer, with no capture-side lock;
+     * CSI may still overwrite it while the hardware encoder reads it. */
     esp_h264_err_t h264_result = esp_h264_enc_process(
         encoder->handle, &input_frame, &output_frame);
     if (h264_result != ESP_H264_ERR_OK) {
@@ -153,6 +156,8 @@ esp_err_t encoder_encode(encoder_t *encoder,
         return h264_error_to_esp(h264_result);
     }
 
+    /* Borrowed encoder-owned output, reused on the next encode. The caller
+     * must finish rtsp_publish() (including its DMA wait) before encoding again. */
     output->data = output_frame.raw_data.buffer;
     output->length = output_frame.length;
     output->pts = output_frame.pts;
