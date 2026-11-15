@@ -18,6 +18,8 @@
 #include "esp_netif.h"
 #include "esp_rtsp.h"
 #include "media_lib_adapter.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 static const char *TAG = "rtsp";
 
@@ -34,8 +36,11 @@ static const char *TAG = "rtsp";
 #define ETHERNET_RMII_RXD0_GPIO 29
 #define ETHERNET_RMII_RXD1_GPIO 30
 
-/* Latest encoded frame and its metadata (currently unsynchronized). */
+/* Protect bytes and metadata only while copying, never while waiting for a
+ * viewer or sending over the network. Unread frames may be replaced. */
 struct rtsp {
+    SemaphoreHandle_t frame_mutex;
+    bool frame_pending;
     uint8_t *latest_frame;
     size_t frame_length;
     uint32_t frame_pts;
@@ -63,7 +68,7 @@ static bool rtsp_string_is_valid(const char *value)
     return value != NULL && value[0] != '\0';
 }
 
-/** Apply the configured static IPv4 configuration after link-up. */
+/** Assign the static IPv4 address before RTSP tries to bind its socket. */
 static esp_err_t configure_ethernet_static_ip(rtsp_t *rtsp)
 {
     esp_err_t result = esp_netif_dhcpc_stop(rtsp->eth_netif);
@@ -91,16 +96,9 @@ static void ethernet_event_handler(void *arg,
 
     if (event_base == ETH_EVENT) {
         switch (event_id) {
-        case ETHERNET_EVENT_CONNECTED: {
-            esp_err_t result = configure_ethernet_static_ip(rtsp);
-            if (result != ESP_OK) {
-                ESP_LOGE(TAG, "failed to configure Ethernet static IP: %s",
-                         esp_err_to_name(result));
-            } else {
-                ESP_LOGI(TAG, "Ethernet link up");
-            }
+        case ETHERNET_EVENT_CONNECTED:
+            ESP_LOGI(TAG, "Ethernet link up");
             break;
-        }
         case ETHERNET_EVENT_DISCONNECTED:
             ESP_LOGW(TAG, "Ethernet link down");
             break;
@@ -256,6 +254,12 @@ static esp_err_t start_ethernet(rtsp_t *rtsp)
     }
     rtsp->ip_event_registered = true;
 
+    result = configure_ethernet_static_ip(rtsp);
+    if (result != ESP_OK) {
+        stop_ethernet(rtsp);
+        return result;
+    }
+
     result = esp_eth_start(rtsp->eth_handle);
     if (result != ESP_OK) {
         stop_ethernet(rtsp);
@@ -274,7 +278,7 @@ static int rtsp_state_handler(esp_rtsp_state_t state, void *ctx)
     return ESP_OK;
 }
 
-/** Copy shared data immediately, without waiting or protecting against publish. */
+/** Copy the newest unread frame, or return zero bytes if none is available. */
 static int rtsp_send_video(unsigned char *data,
                            unsigned int *length,
                            uint32_t *pts,
@@ -284,14 +288,18 @@ static int rtsp_send_video(unsigned char *data,
     if (rtsp == NULL || data == NULL || length == NULL || pts == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
-    const size_t frame_length = rtsp->frame_length;
     *length = 0;
-    if (frame_length > rtsp->frame_capacity || rtsp->latest_frame == NULL) {
-        return ESP_ERR_INVALID_SIZE;
+    *pts = 0;
+    if (xSemaphoreTake(rtsp->frame_mutex, portMAX_DELAY) != pdTRUE) {
+        return ESP_FAIL;
     }
-    memcpy(data, rtsp->latest_frame, frame_length);
-    *length = (unsigned int)frame_length;
-    *pts = rtsp->frame_pts;
+    if (rtsp->frame_pending) {
+        memcpy(data, rtsp->latest_frame, rtsp->frame_length);
+        *length = (unsigned int)rtsp->frame_length;
+        *pts = rtsp->frame_pts;
+        rtsp->frame_pending = false;
+    }
+    xSemaphoreGive(rtsp->frame_mutex);
     return ESP_OK;
 }
 
@@ -314,6 +322,10 @@ static void stop_rtsp_server(rtsp_t *rtsp)
 
     free(rtsp->latest_frame);
     rtsp->latest_frame = NULL;
+    if (rtsp->frame_mutex != NULL) {
+        vSemaphoreDelete(rtsp->frame_mutex);
+        rtsp->frame_mutex = NULL;
+    }
 }
 
 esp_err_t rtsp_create(const rtsp_config_t *config, rtsp_t **out_rtsp)
@@ -350,6 +362,12 @@ esp_err_t rtsp_create(const rtsp_config_t *config, rtsp_t **out_rtsp)
         return ESP_ERR_NO_MEM;
     }
 
+    rtsp->frame_mutex = xSemaphoreCreateMutex();
+    if (rtsp->frame_mutex == NULL) {
+        stop_rtsp_server(rtsp);
+        free(rtsp);
+        return ESP_ERR_NO_MEM;
+    }
     rtsp->video_info = (esp_rtsp_video_info_t) {
         .vcodec = RTSP_VCODEC_H264,
         .width = (int)config->width,
@@ -408,9 +426,16 @@ esp_err_t rtsp_publish(rtsp_t *rtsp,
         return ESP_ERR_INVALID_SIZE;
     }
 
+    /* Wait only for a concurrent copy, not for a viewer to consume the frame.
+     * Replacing unread H.264 frames can lose references until the next IDR. */
+    if (xSemaphoreTake(rtsp->frame_mutex, portMAX_DELAY) != pdTRUE) {
+        return ESP_FAIL;
+    }
     memcpy(rtsp->latest_frame, data, length);
     rtsp->frame_length = length;
     rtsp->frame_pts = pts;
+    rtsp->frame_pending = true;
+    xSemaphoreGive(rtsp->frame_mutex);
     return ESP_OK;
 }
 

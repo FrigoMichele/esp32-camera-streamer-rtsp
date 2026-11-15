@@ -13,6 +13,7 @@
 #include "esp_h264_enc_single.h"
 #include "esp_h264_enc_single_hw.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
 static const char *TAG = "encoder";
 
@@ -20,8 +21,7 @@ struct encoder {
     esp_h264_enc_handle_t handle;
     uint8_t *output_buffer;
     uint32_t output_buffer_size;
-    uint32_t fps;
-    uint32_t frame_number;
+    int64_t start_time_us;
     bool opened;
 };
 
@@ -81,7 +81,7 @@ esp_err_t encoder_create(const encoder_config_t *config,
         free(encoder);
         return ESP_ERR_NO_MEM;
     }
-    encoder->fps = config->fps;
+    encoder->start_time_us = esp_timer_get_time();
 
     esp_h264_enc_cfg_hw_t hw_config = {
         .pic_type = ESP_H264_RAW_FMT_O_UYY_E_VYY,
@@ -136,8 +136,7 @@ esp_err_t encoder_encode(encoder_t *encoder,
             .buffer = (uint8_t *)input,
             .len = (uint32_t)input_size,
         },
-        .pts = (uint32_t)(((uint64_t)encoder->frame_number * 1000U) /
-                          encoder->fps),
+        .pts = (uint32_t)((esp_timer_get_time() - encoder->start_time_us) / 1000),
     };
     esp_h264_enc_out_frame_t output_frame = {
         .raw_data = {
@@ -146,9 +145,8 @@ esp_err_t encoder_encode(encoder_t *encoder,
         },
     };
 
-    /* Synchronous API: output is consumed only after this call returns.
-     * The input pointer is the live camera buffer, with no capture-side lock;
-     * CSI may still overwrite it while the hardware encoder reads it. */
+    /* Synchronous API: camera_frame() keeps this input unchanged until the
+     * caller requests another capture. Output is ready when processing returns. */
     esp_h264_err_t h264_result = esp_h264_enc_process(
         encoder->handle, &input_frame, &output_frame);
     if (h264_result != ESP_H264_ERR_OK) {
@@ -156,12 +154,10 @@ esp_err_t encoder_encode(encoder_t *encoder,
         return h264_error_to_esp(h264_result);
     }
 
-    /* Borrowed encoder-owned output, reused on the next encode. The caller
-     * must finish rtsp_publish() (including its DMA wait) before encoding again. */
+    /* Borrowed output: finish rtsp_publish() before encoding again. */
     output->data = output_frame.raw_data.buffer;
     output->length = output_frame.length;
     output->pts = output_frame.pts;
-    ++encoder->frame_number;
     return ESP_OK;
 }
 

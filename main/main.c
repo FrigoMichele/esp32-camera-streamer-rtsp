@@ -84,39 +84,33 @@ void app_main(void)
 
     const uint32_t frame_limit = CONFIG_H264_ENCODER_FRAME_COUNT;
     uint32_t frame_number = 0;
+    int64_t report_start_us = esp_timer_get_time();
+    ESP_LOGI(TAG, "open %s; capture continues without a viewer",
+             rtsp_config.network.server_uri);
     while (frame_limit == 0 || frame_number < frame_limit) {
-        ESP_LOGI(TAG, "FRAME %" PRIu32, frame_number);
-
-        /* 1. camera_frame() waits for a CSI completion notification.
-         * WARNING: this does not lock the live YUV buffer; CSI can overwrite
-         * it during encoding. RTSP synchronization below does not fix that. */
-        /* Keep capture outside encoder_encode() so capture waiting is not
-         * incorrectly included in the encoder timing. */
-        const uint8_t *input_frame = NULL;
-        TIME_STEP("camera_frame (wait for CSI)",
-                  input_frame = camera_frame(camera));
-        ESP_ERROR_CHECK(input_frame != NULL ? ESP_OK : ESP_ERR_INVALID_STATE);
+        /* One task owns capture -> encode -> publish. The next capture cannot
+         * overwrite the YUV input until encoding has finished. */
+        const uint8_t *input_frame = camera_frame(camera);
+        ESP_ERROR_CHECK(input_frame != NULL ? ESP_OK : ESP_FAIL);
 
         encoder_frame_t encoded_frame = {0};
-        TIME_STEP("encoder_encode",
-                  ESP_ERROR_CHECK(encoder_encode(encoder, input_frame,
-                                                 frame_size, &encoded_frame)));
-        /* 2. Encoding has returned with H.264 bytes in the encoder's reusable
-         * output buffer. Publish locks the shared RTSP buffer and waits for
-         * DMA to transfer those bytes before returning. Only then is it safe
-         * for the next loop iteration to reuse the encoder output buffer. */
-        /* This duration includes mutex contention AND the DMA completion wait;
-         * it does not measure network transmission by the RTSP worker. */
-        TIME_STEP("rtsp_publish (mutex + DMA)",
-                  ESP_ERROR_CHECK(rtsp_publish(rtsp,
-                                               encoded_frame.data,
-                                               encoded_frame.length,
-                                               encoded_frame.pts)));
+        ESP_ERROR_CHECK(encoder_encode(encoder, input_frame,
+                                       frame_size, &encoded_frame));
+        ESP_ERROR_CHECK(rtsp_publish(rtsp, encoded_frame.data,
+                                     encoded_frame.length, encoded_frame.pts));
         ++frame_number;
+
+        /* Avoid per-step UART logs in the hot loop. Report actual throughput,
+         * including capture and copy time, rather than claiming 30 FPS. */
+        if (frame_number % 30 == 0) {
+            const int64_t now_us = esp_timer_get_time();
+            ESP_LOGI(TAG, "published %" PRIu32 " frames, %.1f fps", frame_number,
+                     30000000.0 / (double)(now_us - report_start_us));
+            report_start_us = now_us;
+        }
     }
 
-    /* No further publications: stop RTSP callbacks before freeing the DMA
-     * and shared buffer, then release encoder and capture resources. */
+    /* No further publications: stop callbacks before freeing their buffers. */
     TIME_STEP("rtsp_destroy", rtsp_destroy(rtsp));
     TIME_STEP("encoder_destroy", encoder_destroy(encoder));
     TIME_STEP("camera_destroy", camera_destroy(camera));

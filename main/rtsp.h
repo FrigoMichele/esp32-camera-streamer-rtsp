@@ -44,14 +44,12 @@ esp_err_t rtsp_create(const rtsp_config_t *config, rtsp_t **out_rtsp);
 /**
  * Publish one encoded access unit.
  *
- * The data is transferred by AXI-GDMA before this function returns, so the
- * caller may reuse its encoder buffer immediately afterwards. A mutex protects
- * the shared frame bytes, length and PTS during publication and RTSP transfers.
- * Calls block until DMA completes; DMA errors are returned without a CPU-copy
- * fallback. Buffers must satisfy the IDF DMA driver's memory/alignment rules.
- * Callbacks return zero bytes before the first publish and may repeat the
- * latest access unit; this is a
- * latest-frame buffer, not a queue.
+ * Copy into a latest-frame buffer without waiting for a viewer. A mutex
+ * protects bytes and metadata during copies; the caller may reuse its encoder
+ * buffer after return. Callbacks consume the newest unread frame at most once.
+ * Unread frames may be overwritten. Losing H.264 reference frames can cause
+ * decoding errors until the next keyframe; this is not a lossless queue.
+ * Use one publishing task and stop it before destroying the server.
  */
 esp_err_t rtsp_publish(rtsp_t *rtsp,
                        const uint8_t *data,

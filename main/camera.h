@@ -35,13 +35,13 @@ esp_err_t camera_create(const camera_config_t *config, camera_t **out_camera);
 esp_err_t camera_start(camera_t *camera);
 
 /**
- * Return the live YUV buffer without waiting for a complete frame.
+ * Capture and wait for one complete YUV frame (up to one second).
  *
- * The pointer remains owned by the camera and is valid until the camera is
- * destroyed. CSI continuously overwrites it, even while the caller reads it.
- * This unsynchronized intermediate test can return incomplete/torn frames.
+ * The buffer is camera-owned and is not overwritten until the next call to
+ * camera_frame(). Finish encoding before calling again. Returns NULL on error.
+ * Only one task may use this capture API.
  */
-const uint8_t *camera_frame(const camera_t *camera);
+const uint8_t *camera_frame(camera_t *camera);
 
 /** Return the size, in bytes, of one captured frame. */
 size_t camera_frame_size(const camera_t *camera);

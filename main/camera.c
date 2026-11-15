@@ -19,11 +19,14 @@
 #include "esp_cam_ctlr_csi.h"
 #include "esp_cam_sensor.h"
 #include "esp_cam_sensor_detect.h"
+#include "esp_cache.h"
 #include "esp_h264_alloc.h"
 #include "esp_ldo_regulator.h"
 #include "esp_log.h"
 #include "esp_sccb_intf.h"
 #include "esp_sccb_i2c.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "sdkconfig.h"
 
 static const char *TAG = "camera";
@@ -39,7 +42,9 @@ struct camera {
     i2c_master_bus_handle_t i2c_bus;
     esp_sccb_io_handle_t sccb_io;
 
-    esp_cam_ctlr_trans_t transaction;
+    SemaphoreHandle_t frame_done;
+    bool capture_pending;
+    bool line_sync_enabled;
     uint8_t *frame_buffer;
     size_t frame_size;
     uint32_t frame_buffer_size;
@@ -158,34 +163,19 @@ static esp_err_t configure_isp(isp_proc_handle_t isp)
     return esp_isp_color_enable(isp);
 }
 
-/** Reuse the same YUV buffer continuously; intentionally no reader protection. */
-static bool IRAM_ATTR camera_get_new_buffer(esp_cam_ctlr_handle_t handle,
-                                            esp_cam_ctlr_trans_t *transaction,
-                                            void *user_data)
-{
-    (void)handle;
-
-    camera_t *camera = user_data;
-    if (camera == NULL || transaction == NULL) {
-        return false;
-    }
-
-    /* No ownership handoff: CSI immediately reuses this single buffer even
-     * if the application/encoder is still reading the previous frame. */
-    transaction->buffer = camera->transaction.buffer;
-    transaction->buflen = camera->transaction.buflen;
-    return false;
-}
-
-/** Required CSI completion callback; intentionally does not notify any task. */
+/** Wake the reader only after its requested frame has finished. */
 static bool IRAM_ATTR camera_transaction_finished(esp_cam_ctlr_handle_t handle,
                                                   esp_cam_ctlr_trans_t *transaction,
                                                   void *user_data)
 {
     (void)handle;
-    (void)transaction;
-    (void)user_data;
-    return false;
+    camera_t *camera = user_data;
+    if (transaction->buffer != camera->frame_buffer) {
+        return false;
+    }
+    BaseType_t task_woken = pdFALSE;
+    xSemaphoreGiveFromISR(camera->frame_done, &task_woken);
+    return task_woken == pdTRUE;
 }
 
 /** Initialize the sensor, detect it over SCCB and select its format. */
@@ -303,6 +293,13 @@ static esp_err_t camera_sensor_init(camera_t *camera,
         ESP_LOGE(TAG, "unsupported sensor format: %s", config->format_name);
         return ESP_ERR_INVALID_ARG;
     }
+
+    if (selected_format->width != config->width ||
+        selected_format->height != config->height) {
+        ESP_LOGE(TAG, "sensor format dimensions must match the encoder");
+        return ESP_ERR_INVALID_ARG;
+    }
+    camera->line_sync_enabled = selected_format->mipi_info.line_sync_en;
 
     result = esp_cam_sensor_set_format(camera->sensor, selected_format);
     if (result != ESP_OK) {
@@ -440,6 +437,10 @@ static void camera_release_partial(camera_t *camera)
         camera->mipi_ldo = NULL;
     }
 
+    if (camera->frame_done != NULL) {
+        vSemaphoreDelete(camera->frame_done);
+        camera->frame_done = NULL;
+    }
     if (camera->frame_buffer != NULL) {
         esp_h264_free(camera->frame_buffer);
         camera->frame_buffer = NULL;
@@ -470,6 +471,12 @@ esp_err_t camera_create(const camera_config_t *config, camera_t **out_camera)
 
     camera_t *camera = calloc(1, sizeof(*camera));
     if (camera == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    camera->frame_done = xSemaphoreCreateBinary();
+    if (camera->frame_done == NULL) {
+        free(camera);
         return ESP_ERR_NO_MEM;
     }
 
@@ -519,12 +526,11 @@ esp_err_t camera_create(const camera_config_t *config, camera_t **out_camera)
         return result;
     }
 
+    /* Without on_get_new_trans, CSI takes buffers from receive(). Between
+     * requests it writes only to its internal backup/discard buffer. */
     esp_cam_ctlr_evt_cbs_t callbacks = {
-        .on_get_new_trans = camera_get_new_buffer,
         .on_trans_finished = camera_transaction_finished,
     };
-    camera->transaction.buffer = camera->frame_buffer;
-    camera->transaction.buflen = camera->frame_buffer_size;
     result = esp_cam_ctlr_register_event_callbacks(
         camera->controller, &callbacks, camera);
     if (result != ESP_OK) {
@@ -548,8 +554,8 @@ esp_err_t camera_create(const camera_config_t *config, camera_t **out_camera)
         .output_data_color_type = ISP_COLOR_YUV420,
         .yuv_range = ISP_COLOR_RANGE_FULL,
         .yuv_std = ISP_YUV_CONV_STD_BT601,
-        .has_line_start_packet = false,
-        .has_line_end_packet = false,
+        .has_line_start_packet = camera->line_sync_enabled,
+        .has_line_end_packet = camera->line_sync_enabled,
         .h_res = config->width,
         .v_res = config->height,
         .bayer_order = COLOR_RAW_ELEMENT_ORDER_GBRG,
@@ -599,9 +605,43 @@ esp_err_t camera_start(camera_t *camera)
     return ESP_OK;
 }
 
-const uint8_t *camera_frame(const camera_t *camera)
+const uint8_t *camera_frame(camera_t *camera)
 {
-    return camera != NULL ? camera->frame_buffer : NULL;
+    if (camera == NULL || !camera->controller_started) {
+        return NULL;
+    }
+
+    /* Re-submit only when the caller has finished reading the previous frame.
+     * On timeout, retain the pending request so a retry cannot queue it twice. */
+    if (!camera->capture_pending) {
+        esp_cam_ctlr_trans_t transaction = {
+            .buffer = camera->frame_buffer,
+            .buflen = camera->frame_buffer_size,
+        };
+        esp_err_t result = esp_cam_ctlr_receive(camera->controller,
+                                               &transaction, 1000);
+        if (result != ESP_OK) {
+            ESP_LOGE(TAG, "capture request failed: %s", esp_err_to_name(result));
+            return NULL;
+        }
+        camera->capture_pending = true;
+    }
+    if (xSemaphoreTake(camera->frame_done, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        ESP_LOGE(TAG, "timed out waiting for a complete camera frame");
+        return NULL;
+    }
+    camera->capture_pending = false;
+
+    /* DMA wrote PSRAM. Invalidate stale CPU cache lines before the encoder's
+     * cache writeback can overwrite the newly captured pixels. */
+    esp_err_t result = esp_cache_msync(camera->frame_buffer,
+                                       camera->frame_buffer_size,
+                                       ESP_CACHE_MSYNC_FLAG_DIR_M2C);
+    if (result != ESP_OK) {
+        ESP_LOGE(TAG, "capture cache sync failed: %s", esp_err_to_name(result));
+        return NULL;
+    }
+    return camera->frame_buffer;
 }
 
 size_t camera_frame_size(const camera_t *camera)
