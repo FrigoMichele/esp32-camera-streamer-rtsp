@@ -33,7 +33,9 @@ typedef struct {
 typedef struct {
     uint32_t width;
     uint32_t height;
-    uint32_t fps;
+    /* Server send-callback polling rate (1..1000 Hz), NOT encoded video FPS.
+     * The H.264 SPS and per-frame PTS carry the actual video timing. */
+    uint32_t send_poll_hz;
     size_t max_frame_size;
     rtsp_network_config_t network;
 } rtsp_config_t;

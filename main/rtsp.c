@@ -370,7 +370,8 @@ static void stop_rtsp_server(rtsp_t *rtsp)
 esp_err_t rtsp_create(const rtsp_config_t *config, rtsp_t **out_rtsp)
 {
     if (config == NULL || out_rtsp == NULL || config->width == 0 ||
-        config->height == 0 || config->fps == 0 ||
+        config->height == 0 || config->send_poll_hz == 0 ||
+        config->send_poll_hz > 1000 ||
         config->max_frame_size == 0 || config->max_frame_size > UINT_MAX ||
         config->max_frame_size > INT_MAX ||
         config->network.server_port == 0 ||
@@ -411,7 +412,11 @@ esp_err_t rtsp_create(const rtsp_config_t *config, rtsp_t **out_rtsp)
         .vcodec = RTSP_VCODEC_H264,
         .width = (int)config->width,
         .height = (int)config->height,
-        .fps = (int)config->fps,
+        /* esp_media_protocols uses this maximum FPS to schedule _rtp_video
+         * at 1000000 / fps us. Poll independently of the encoder's FPS so a
+         * ready frame needn't wait a full video period. Empty polls return
+         * zero bytes; SPS/PTS still describe the encoder's actual cadence. */
+        .fps = (int)config->send_poll_hz,
         .len = (int)config->max_frame_size,
     };
     rtsp->callbacks = (esp_rtsp_data_cb_t) {
@@ -448,7 +453,9 @@ esp_err_t rtsp_create(const rtsp_config_t *config, rtsp_t **out_rtsp)
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "RTSP server listening on %s", rtsp->network.server_uri);
+    ESP_LOGI(TAG, "RTSP server listening on %s; send poll=%u Hz (%u us)",
+             rtsp->network.server_uri, (unsigned)config->send_poll_hz,
+             (unsigned)(1000000U / config->send_poll_hz));
     *out_rtsp = rtsp;
     return ESP_OK;
 }

@@ -53,7 +53,8 @@ void app_main(void)
         .fps = CONFIG_H264_ENCODER_FPS,
         .bitrate = CONFIG_H264_ENCODER_BITRATE,
         .gop_size = CONFIG_H264_ENCODER_GOP_SIZE,
-        .qp_value = CONFIG_H264_ENCODER_QP_VALUE,
+        .qp_min = CONFIG_H264_ENCODER_QP_MIN,
+        .qp_max = CONFIG_H264_ENCODER_QP_MAX,
     };
 
     //- Create encoder device
@@ -63,7 +64,7 @@ void app_main(void)
     rtsp_config_t rtsp_config = {
         .width = width,
         .height = height,
-        .fps = CONFIG_H264_ENCODER_FPS,
+        .send_poll_hz = CONFIG_RTSP_SEND_POLL_HZ,
         .max_frame_size = frame_size,
         .network = {
             .server_port = 8554,
@@ -89,6 +90,8 @@ void app_main(void)
     int64_t capture_total_us = 0;
     int64_t encode_total_us = 0;
     int64_t publish_total_us = 0;
+    uint64_t encoded_bytes = 0;
+    size_t max_encoded_size = 0;
     ESP_LOGI(TAG, "open %s; capture continues without a viewer",
              rtsp_config.network.server_uri);
     while (frame_limit == 0 || frame_number < frame_limit) {
@@ -112,19 +115,28 @@ void app_main(void)
         capture_total_us += capture_end_us - capture_start_us;
         encode_total_us += encode_end_us - capture_end_us;
         publish_total_us += now_us - encode_end_us;
+        encoded_bytes += encoded_frame.length;
+        if (encoded_frame.length > max_encoded_size) {
+            max_encoded_size = encoded_frame.length;
+        }
 
         /* Aggregate only: never log each frame in the capture hot path. */
         if (now_us - report_start_us >= 1000000) {
             const double divisor = 1000.0 * report_frames;
             ESP_LOGI(TAG, "pipeline: %.1f fps, n=%" PRIu32
-                     ", avg ms capture=%.2f encode=%.2f publish=%.2f total=%.2f",
+                     ", avg ms capture=%.2f encode=%.2f publish=%.2f total=%.2f"
+                     ", encoded=%.0f kbit/s max_AU=%zu B",
                      report_frames * 1000000.0 / (now_us - report_start_us),
                      report_frames, capture_total_us / divisor,
                      encode_total_us / divisor, publish_total_us / divisor,
-                     (capture_total_us + encode_total_us + publish_total_us) / divisor);
+                     (capture_total_us + encode_total_us + publish_total_us) / divisor,
+                     encoded_bytes * 8000.0 / (now_us - report_start_us),
+                     max_encoded_size);
             report_start_us = now_us;
             report_frames = 0;
             capture_total_us = encode_total_us = publish_total_us = 0;
+            encoded_bytes = 0;
+            max_encoded_size = 0;
         }
     }
 

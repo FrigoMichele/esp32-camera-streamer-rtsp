@@ -65,7 +65,8 @@ esp_err_t encoder_create(const encoder_config_t *config,
         config->height < 80 || config->height > UINT16_MAX ||
         config->fps == 0 || config->fps > UINT8_MAX ||
         config->gop_size == 0 || config->gop_size > UINT8_MAX ||
-        config->qp_value > 51 || input_frame_size > UINT32_MAX) {
+        config->bitrate == 0 || config->qp_min >= config->qp_max ||
+        config->qp_max > 51 || input_frame_size > UINT32_MAX) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -93,8 +94,9 @@ esp_err_t encoder_create(const encoder_config_t *config,
         },
         .rc = {
             .bitrate = config->bitrate,
-            .qp_min = (uint8_t)config->qp_value,
-            .qp_max = (uint8_t)config->qp_value,
+            /* Equal bounds disable RC in esp_h264; keep a real QP range. */
+            .qp_min = (uint8_t)config->qp_min,
+            .qp_max = (uint8_t)config->qp_max,
         },
     };
 
@@ -117,6 +119,10 @@ esp_err_t encoder_create(const encoder_config_t *config,
     }
     encoder->opened = true;
 
+    ESP_LOGI(TAG, "H.264 target=%lu bit/s, fps=%lu, GOP=%lu, RC QP=%lu..%lu",
+             (unsigned long)config->bitrate, (unsigned long)config->fps,
+             (unsigned long)config->gop_size, (unsigned long)config->qp_min,
+             (unsigned long)config->qp_max);
     *out_encoder = encoder;
     return ESP_OK;
 }

@@ -29,10 +29,33 @@ menu "ESP32-P4 Camera and H.264 Encoder"
         range 1 255
         default 10
 
-    config H264_ENCODER_QP_VALUE
-        int "Quantization parameter"
-        range 10 51
+    config H264_ENCODER_QP_MIN
+        int "Minimum quantization parameter (best quality)"
+        range 10 50
         default 26
+        help
+            Lower bound for hardware bitrate control. Must be strictly less
+            than the maximum QP; equal bounds disable bitrate control.
+
+    config H264_ENCODER_QP_MAX
+        int "Maximum quantization parameter (most compression)"
+        range H264_ENCODER_QP_MIN 51
+        default 51
+        help
+            Upper bound for hardware bitrate control. Must be strictly greater
+            than the minimum QP. Allowing high QP helps meet the bitrate target
+            for complex/noisy scenes, at the cost of image quality. The target
+            is not a strict per-frame/network bandwidth cap.
+
+    config RTSP_SEND_POLL_HZ
+        int "RTSP send-callback polling rate (Hz, not video FPS)"
+        range 1 1000
+        default 200
+        help
+            Poll the latest encoded frame independently of the encoder FPS.
+            200 Hz means a 5 ms polling period instead of 100 ms at 10 FPS.
+            Empty polls send nothing; H.264 SPS/PTS retain the encoder timing.
+            Sending and other ESP timer callbacks can extend this wait.
 
     config H264_ENCODER_FRAME_COUNT
         int "Number of frames to capture"

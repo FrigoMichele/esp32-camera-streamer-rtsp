@@ -50,6 +50,32 @@ The board's Ethernet cable and playback computer must be on the
 Wi-Fi interface or adjust the board-specific Ethernet initialization if your
 hardware is not the Function EV Board.
 
+## Low-latency playback and encoding
+
+Use video-master sync for this video-only stream to avoid FFplay's external
+clock building a playback reserve:
+
+```sh
+ffplay -rtsp_transport udp -fflags nobuffer -flags low_delay -framedrop -sync video -max_delay 0 -reorder_queue_size 0 -analyzeduration 0 -probesize 32768 rtsp://192.168.2.5:8554/live
+```
+
+Firmware defaults (configurable in `idf.py menuconfig`):
+
+- Encoder target **10 FPS**, GOP **10**, bitrate **1,000,000 bit/s**. The sensor
+  remains in its 30-FPS mode; actual encoded throughput is reported in the log.
+- Rate-control QP range **26..51**, rather than fixed QP. Minimum QP must be
+  strictly less than maximum QP; high QP reduces image quality to help meet the
+  bitrate target. This is rate control, not a strict bandwidth cap.
+- `CONFIG_RTSP_SEND_POLL_HZ=200`: poll for ready frames every **5 ms**, independent
+  of the encoder FPS. This maps to the RTSP library's maximum-FPS timer field;
+  it does not advertise a 200-FPS H.264 stream or change SPS/PTS. Empty polls
+  return immediately and send nothing. Busy timer/network work can add delay.
+
+Once-per-second logs report pipeline timing, measured encoded kbit/s, largest
+access unit (`max_AU`), and frame age at the RTSP callback during playback.
+See [the latency investigation](docs/latency-analysis.md) for the baseline
+measurements and the distinction between callback age and glass-to-glass delay.
+
 ## Hardware configuration
 
 The camera defaults follow the ESP-IDF camera example; Ethernet uses the Function EV Board pinout:

@@ -23,7 +23,9 @@ typedef struct {
     uint32_t fps;
     uint32_t bitrate;
     uint32_t gop_size;
-    uint32_t qp_value;
+    /* Require qp_min < qp_max to enable hardware bitrate control. */
+    uint32_t qp_min;
+    uint32_t qp_max;
 } encoder_config_t;
 
 typedef struct {
