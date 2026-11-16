@@ -17,6 +17,7 @@
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_rtsp.h"
+#include "esp_timer.h"
 #include "media_lib_adapter.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -44,6 +45,13 @@ struct rtsp {
     uint8_t *latest_frame;
     size_t frame_length;
     uint32_t frame_pts;
+    int64_t capture_start_us;
+    int64_t published_us;
+    int64_t age_report_start_us;
+    int64_t age_total_us;
+    int64_t age_max_us;
+    int64_t pending_total_us;
+    uint32_t age_samples;
     size_t frame_capacity;
     rtsp_network_config_t network;
 
@@ -293,13 +301,44 @@ static int rtsp_send_video(unsigned char *data,
     if (xSemaphoreTake(rtsp->frame_mutex, portMAX_DELAY) != pdTRUE) {
         return ESP_FAIL;
     }
+    bool report_age = false;
+    double avg_age_ms = 0, max_age_ms = 0, avg_pending_ms = 0;
+    uint32_t samples = 0;
     if (rtsp->frame_pending) {
         memcpy(data, rtsp->latest_frame, rtsp->frame_length);
         *length = (unsigned int)rtsp->frame_length;
         *pts = rtsp->frame_pts;
         rtsp->frame_pending = false;
+        const int64_t now_us = esp_timer_get_time();
+        const int64_t age_us = now_us - rtsp->capture_start_us;
+        if (rtsp->age_report_start_us == 0) {
+            rtsp->age_report_start_us = now_us;
+        }
+        rtsp->age_total_us += age_us;
+        rtsp->pending_total_us += now_us - rtsp->published_us;
+        if (age_us > rtsp->age_max_us) {
+            rtsp->age_max_us = age_us;
+        }
+        ++rtsp->age_samples;
+        if (now_us - rtsp->age_report_start_us >= 1000000) {
+            samples = rtsp->age_samples;
+            avg_age_ms = rtsp->age_total_us / (1000.0 * samples);
+            max_age_ms = rtsp->age_max_us / 1000.0;
+            avg_pending_ms = rtsp->pending_total_us / (1000.0 * samples);
+            rtsp->age_samples = 0;
+            rtsp->age_total_us = rtsp->age_max_us = rtsp->pending_total_us = 0;
+            rtsp->age_report_start_us = now_us;
+            report_age = true;
+        }
     }
     xSemaphoreGive(rtsp->frame_mutex);
+    /* Never hold the frame mutex during UART logging. Callback completion is
+     * before RTP transmission: this is firmware age, not glass-to-glass delay. */
+    if (report_age) {
+        ESP_LOGI(TAG, "callback: n=%u, capture-request age ms avg=%.2f max=%.2f, "
+                 "publish-to-callback avg=%.2f", (unsigned)samples,
+                 avg_age_ms, max_age_ms, avg_pending_ms);
+    }
     return ESP_OK;
 }
 
@@ -417,7 +456,8 @@ esp_err_t rtsp_create(const rtsp_config_t *config, rtsp_t **out_rtsp)
 esp_err_t rtsp_publish(rtsp_t *rtsp,
                        const uint8_t *data,
                        size_t length,
-                       uint32_t pts)
+                       uint32_t pts,
+                       int64_t capture_start_us)
 {
     if (rtsp == NULL || data == NULL || length == 0) {
         return ESP_ERR_INVALID_ARG;
@@ -434,6 +474,8 @@ esp_err_t rtsp_publish(rtsp_t *rtsp,
     memcpy(rtsp->latest_frame, data, length);
     rtsp->frame_length = length;
     rtsp->frame_pts = pts;
+    rtsp->capture_start_us = capture_start_us;
+    rtsp->published_us = esp_timer_get_time();
     rtsp->frame_pending = true;
     xSemaphoreGive(rtsp->frame_mutex);
     return ESP_OK;

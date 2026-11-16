@@ -49,12 +49,15 @@ esp_err_t rtsp_create(const rtsp_config_t *config, rtsp_t **out_rtsp);
  * buffer after return. Callbacks consume the newest unread frame at most once.
  * Unread frames may be overwritten. Losing H.264 reference frames can cause
  * decoding errors until the next keyframe; this is not a lossless queue.
+ * capture_start_us is the esp_timer timestamp before requesting this capture;
+ * used only for callback-age diagnostics, not RTP timestamps.
  * Use one publishing task and stop it before destroying the server.
  */
 esp_err_t rtsp_publish(rtsp_t *rtsp,
                        const uint8_t *data,
                        size_t length,
-                       uint32_t pts);
+                       uint32_t pts,
+                       int64_t capture_start_us);
 
 /** Stop the server and release resources; caller must first stop publishing. */
 void rtsp_destroy(rtsp_t *rtsp);

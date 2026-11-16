@@ -16,8 +16,8 @@ menu "ESP32-P4 Camera and H.264 Encoder"
 
     config H264_ENCODER_FPS
         int "Encoder frame rate"
-        range 30 30
-        default 30
+        range 1 30
+        default 10
 
     config H264_ENCODER_BITRATE
         int "Target bitrate (bps)"
@@ -27,7 +27,7 @@ menu "ESP32-P4 Camera and H.264 Encoder"
     config H264_ENCODER_GOP_SIZE
         int "GOP size"
         range 1 255
-        default 30
+        default 10
 
     config H264_ENCODER_QP_VALUE
         int "Quantization parameter"

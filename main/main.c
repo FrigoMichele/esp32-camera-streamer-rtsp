@@ -85,28 +85,46 @@ void app_main(void)
     const uint32_t frame_limit = CONFIG_H264_ENCODER_FRAME_COUNT;
     uint32_t frame_number = 0;
     int64_t report_start_us = esp_timer_get_time();
+    uint32_t report_frames = 0;
+    int64_t capture_total_us = 0;
+    int64_t encode_total_us = 0;
+    int64_t publish_total_us = 0;
     ESP_LOGI(TAG, "open %s; capture continues without a viewer",
              rtsp_config.network.server_uri);
     while (frame_limit == 0 || frame_number < frame_limit) {
         /* One task owns capture -> encode -> publish. The next capture cannot
          * overwrite the YUV input until encoding has finished. */
+        const int64_t capture_start_us = esp_timer_get_time();
         const uint8_t *input_frame = camera_frame(camera);
         ESP_ERROR_CHECK(input_frame != NULL ? ESP_OK : ESP_FAIL);
 
+        const int64_t capture_end_us = esp_timer_get_time();
         encoder_frame_t encoded_frame = {0};
         ESP_ERROR_CHECK(encoder_encode(encoder, input_frame,
                                        frame_size, &encoded_frame));
+        const int64_t encode_end_us = esp_timer_get_time();
         ESP_ERROR_CHECK(rtsp_publish(rtsp, encoded_frame.data,
-                                     encoded_frame.length, encoded_frame.pts));
+                                     encoded_frame.length, encoded_frame.pts,
+                                     capture_start_us));
+        const int64_t now_us = esp_timer_get_time();
         ++frame_number;
+        ++report_frames;
+        capture_total_us += capture_end_us - capture_start_us;
+        encode_total_us += encode_end_us - capture_end_us;
+        publish_total_us += now_us - encode_end_us;
 
-        /* Avoid per-step UART logs in the hot loop. Report actual throughput,
-         * including capture and copy time, rather than claiming 30 FPS. */
-        if (frame_number % 30 == 0) {
-            const int64_t now_us = esp_timer_get_time();
-            ESP_LOGI(TAG, "published %" PRIu32 " frames, %.1f fps", frame_number,
-                     30000000.0 / (double)(now_us - report_start_us));
+        /* Aggregate only: never log each frame in the capture hot path. */
+        if (now_us - report_start_us >= 1000000) {
+            const double divisor = 1000.0 * report_frames;
+            ESP_LOGI(TAG, "pipeline: %.1f fps, n=%" PRIu32
+                     ", avg ms capture=%.2f encode=%.2f publish=%.2f total=%.2f",
+                     report_frames * 1000000.0 / (now_us - report_start_us),
+                     report_frames, capture_total_us / divisor,
+                     encode_total_us / divisor, publish_total_us / divisor,
+                     (capture_total_us + encode_total_us + publish_total_us) / divisor);
             report_start_us = now_us;
+            report_frames = 0;
+            capture_total_us = encode_total_us = publish_total_us = 0;
         }
     }
 
