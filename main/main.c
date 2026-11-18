@@ -106,9 +106,15 @@ void app_main(void)
         ESP_ERROR_CHECK(encoder_encode(encoder, input_frame,
                                        frame_size, &encoded_frame));
         const int64_t encode_end_us = esp_timer_get_time();
+        const rtsp_frame_timing_t timing = {
+            .frame_id = frame_number + 1,
+            .capture_start_us = capture_start_us,
+            .raw_ready_us = capture_end_us,
+            .encode_end_us = encode_end_us,
+        };
         ESP_ERROR_CHECK(rtsp_publish(rtsp, encoded_frame.data,
                                      encoded_frame.length, encoded_frame.pts,
-                                     capture_start_us));
+                                     &timing));
         const int64_t now_us = esp_timer_get_time();
         ++frame_number;
         ++report_frames;
@@ -120,7 +126,7 @@ void app_main(void)
             max_encoded_size = encoded_frame.length;
         }
 
-        /* Aggregate only: never log each frame in the capture hot path. */
+        /* Report only at bucket boundaries, outside the timed operations. */
         if (now_us - report_start_us >= 1000000) {
             const double divisor = 1000.0 * report_frames;
             ESP_LOGI(TAG, "pipeline: %.1f fps, n=%" PRIu32
@@ -132,6 +138,7 @@ void app_main(void)
                      (capture_total_us + encode_total_us + publish_total_us) / divisor,
                      encoded_bytes * 8000.0 / (now_us - report_start_us),
                      max_encoded_size);
+            rtsp_report_timing(rtsp);
             report_start_us = now_us;
             report_frames = 0;
             capture_total_us = encode_total_us = publish_total_us = 0;

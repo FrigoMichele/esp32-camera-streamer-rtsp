@@ -52,12 +52,20 @@ hardware is not the Function EV Board.
 
 ## Low-latency playback and encoding
 
-Use video-master sync for this video-only stream to avoid FFplay's external
-clock building a playback reserve:
+For video-only live preview, use video-master sync **and untimed presentation**
+so FFplay can catch up after a display/window stall:
 
 ```sh
-ffplay -rtsp_transport udp -fflags nobuffer -flags low_delay -framedrop -sync video -max_delay 0 -reorder_queue_size 0 -analyzeduration 0 -probesize 32768 rtsp://192.168.2.5:8554/live
+ffplay -rtsp_transport udp -fflags nobuffer -flags low_delay -framedrop -sync video -vf "setpts=N" -max_delay 0 -reorder_queue_size 0 -analyzeduration 0 -probesize 32768 rtsp://192.168.2.5:8554/live
 ```
+
+`setpts=N` assigns successive decoded pictures one timebase tick apart, rather
+than replaying a backlog at the source's presentation cadence. The live input
+normally determines display cadence; after a stall the receiver can drain its
+queue rapidly. This deliberately changes playback timestamps: use it only for
+video-only live viewing, not A/V synchronization or timestamp-accurate playback.
+Without this filter, `-sync video` reduces initial buffering but can preserve
+newly accumulated delay after a stall. Firmware/RTP timestamps are unchanged.
 
 Firmware defaults (configurable in `idf.py menuconfig`):
 
@@ -73,8 +81,10 @@ Firmware defaults (configurable in `idf.py menuconfig`):
 
 Once-per-second logs report pipeline timing, measured encoded kbit/s, largest
 access unit (`max_AU`), and frame age at the RTSP callback during playback.
-See [the latency investigation](docs/latency-analysis.md) for the baseline
-measurements and the distinction between callback age and glass-to-glass delay.
+The `trace:` line breaks down the slowest handed-off frame in each interval,
+keyed by its original `pts_ms`; `cb_us` is **before** RTP send, not display time.
+For a persistent ~700 ms, [collect the matching FFplay log and optical measurement](docs/latency-analysis.md#isolating-a-steady-700-ms)
+before tuning more flags. `tools/ffplay_timing.py` summarizes the receiver log offline.
 
 ## Hardware configuration
 

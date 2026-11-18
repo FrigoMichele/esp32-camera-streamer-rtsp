@@ -6,6 +6,7 @@
 
 #include "rtsp.h"
 
+#include <inttypes.h>
 #include <limits.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -37,6 +38,22 @@ static const char *TAG = "rtsp";
 #define ETHERNET_RMII_RXD0_GPIO 29
 #define ETHERNET_RMII_RXD1_GPIO 30
 
+/* Keep timestamps for the consumed picture with the largest request age,
+ * not independent maxima from different pictures. No frame data is retained. */
+typedef struct {
+    uint32_t samples;
+    uint32_t overwritten;
+    int64_t age_total_us;
+    int64_t age_max_us;
+    int64_t pending_total_us;
+    rtsp_frame_timing_t source;
+    uint32_t pts_ms;
+    size_t bytes;
+    int64_t published_us;
+    int64_t taken_us;
+    int64_t copied_us;
+} callback_stats_t;
+
 /* Protect bytes and metadata only while copying, never while waiting for a
  * viewer or sending over the network. Unread frames may be replaced. */
 struct rtsp {
@@ -45,13 +62,9 @@ struct rtsp {
     uint8_t *latest_frame;
     size_t frame_length;
     uint32_t frame_pts;
-    int64_t capture_start_us;
+    rtsp_frame_timing_t frame_timing;
     int64_t published_us;
-    int64_t age_report_start_us;
-    int64_t age_total_us;
-    int64_t age_max_us;
-    int64_t pending_total_us;
-    uint32_t age_samples;
+    callback_stats_t stats;
     size_t frame_capacity;
     rtsp_network_config_t network;
 
@@ -282,7 +295,9 @@ static esp_err_t start_ethernet(rtsp_t *rtsp)
 static int rtsp_state_handler(esp_rtsp_state_t state, void *ctx)
 {
     (void)ctx;
-    ESP_LOGI(TAG, "RTSP state: %d", (int)state);
+    /* Same clock as cb_us; SETUP can be bracketed by its request/reply
+     * in a receiver packet capture without trusting serial arrival time. */
+    ESP_LOGI(TAG, "RTSP state: %d event_us=%" PRId64, (int)state, esp_timer_get_time());
     return ESP_OK;
 }
 
@@ -301,45 +316,60 @@ static int rtsp_send_video(unsigned char *data,
     if (xSemaphoreTake(rtsp->frame_mutex, portMAX_DELAY) != pdTRUE) {
         return ESP_FAIL;
     }
-    bool report_age = false;
-    double avg_age_ms = 0, max_age_ms = 0, avg_pending_ms = 0;
-    uint32_t samples = 0;
     if (rtsp->frame_pending) {
+        const int64_t taken_us = esp_timer_get_time();
         memcpy(data, rtsp->latest_frame, rtsp->frame_length);
         *length = (unsigned int)rtsp->frame_length;
         *pts = rtsp->frame_pts;
         rtsp->frame_pending = false;
         const int64_t now_us = esp_timer_get_time();
-        const int64_t age_us = now_us - rtsp->capture_start_us;
-        if (rtsp->age_report_start_us == 0) {
-            rtsp->age_report_start_us = now_us;
+        const int64_t age_us = now_us - rtsp->frame_timing.capture_start_us;
+        callback_stats_t *s = &rtsp->stats;
+        if (s->samples == 0 || age_us > s->age_max_us) {
+            s->age_max_us = age_us;
+            s->source = rtsp->frame_timing;
+            s->pts_ms = *pts;
+            s->bytes = *length;
+            s->published_us = rtsp->published_us;
+            s->taken_us = taken_us;
+            s->copied_us = now_us;
         }
-        rtsp->age_total_us += age_us;
-        rtsp->pending_total_us += now_us - rtsp->published_us;
-        if (age_us > rtsp->age_max_us) {
-            rtsp->age_max_us = age_us;
-        }
-        ++rtsp->age_samples;
-        if (now_us - rtsp->age_report_start_us >= 1000000) {
-            samples = rtsp->age_samples;
-            avg_age_ms = rtsp->age_total_us / (1000.0 * samples);
-            max_age_ms = rtsp->age_max_us / 1000.0;
-            avg_pending_ms = rtsp->pending_total_us / (1000.0 * samples);
-            rtsp->age_samples = 0;
-            rtsp->age_total_us = rtsp->age_max_us = rtsp->pending_total_us = 0;
-            rtsp->age_report_start_us = now_us;
-            report_age = true;
-        }
+        s->age_total_us += age_us;
+        s->pending_total_us += now_us - rtsp->published_us;
+        ++s->samples;
     }
     xSemaphoreGive(rtsp->frame_mutex);
-    /* Never hold the frame mutex during UART logging. Callback completion is
-     * before RTP transmission: this is firmware age, not glass-to-glass delay. */
-    if (report_age) {
-        ESP_LOGI(TAG, "callback: n=%u, capture-request age ms avg=%.2f max=%.2f, "
-                 "publish-to-callback avg=%.2f", (unsigned)samples,
-                 avg_age_ms, max_age_ms, avg_pending_ms);
-    }
     return ESP_OK;
+}
+
+void rtsp_report_timing(rtsp_t *rtsp)
+{
+    /* Never wait just to print a diagnostic. If busy, keep the stats for the
+     * next report. No formatting/UART in the ESP timer callback or mutex. */
+    if (rtsp == NULL || xSemaphoreTake(rtsp->frame_mutex, 0) != pdTRUE) {
+        return;
+    }
+    const callback_stats_t s = rtsp->stats;
+    rtsp->stats = (callback_stats_t){0};
+    xSemaphoreGive(rtsp->frame_mutex);
+
+    if (s.samples == 0) {
+        ESP_LOGI(TAG, "callback: n=0, overwritten=%" PRIu32, s.overwritten);
+        return;
+    }
+    const double divisor = 1000.0 * s.samples;
+    ESP_LOGI(TAG, "callback: n=%" PRIu32 ", capture-request age ms avg=%.2f max=%.2f, "
+             "publish-to-callback avg=%.2f, overwritten=%" PRIu32,
+             s.samples, s.age_total_us / divisor, s.age_max_us / 1000.0,
+             s.pending_total_us / divisor, s.overwritten);
+    ESP_LOGI(TAG, "trace: id=%" PRIu32 " pts_ms=%" PRIu32 " bytes=%zu cb_us=%" PRId64
+             " cap_us=%" PRId64 " enc_us=%" PRId64 " pub_us=%" PRId64
+             " slot_us=%" PRId64 " copy_us=%" PRId64,
+             s.source.frame_id, s.pts_ms, s.bytes, s.copied_us,
+             s.source.raw_ready_us - s.source.capture_start_us,
+             s.source.encode_end_us - s.source.raw_ready_us,
+             s.published_us - s.source.encode_end_us,
+             s.taken_us - s.published_us, s.copied_us - s.taken_us);
 }
 
 /** Stop callbacks before freeing the shared buffer. */
@@ -464,9 +494,9 @@ esp_err_t rtsp_publish(rtsp_t *rtsp,
                        const uint8_t *data,
                        size_t length,
                        uint32_t pts,
-                       int64_t capture_start_us)
+                       const rtsp_frame_timing_t *timing)
 {
-    if (rtsp == NULL || data == NULL || length == 0) {
+    if (rtsp == NULL || data == NULL || length == 0 || timing == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
     if (length > rtsp->frame_capacity) {
@@ -478,10 +508,13 @@ esp_err_t rtsp_publish(rtsp_t *rtsp,
     if (xSemaphoreTake(rtsp->frame_mutex, portMAX_DELAY) != pdTRUE) {
         return ESP_FAIL;
     }
+    if (rtsp->frame_pending) {
+        ++rtsp->stats.overwritten;
+    }
     memcpy(rtsp->latest_frame, data, length);
     rtsp->frame_length = length;
     rtsp->frame_pts = pts;
-    rtsp->capture_start_us = capture_start_us;
+    rtsp->frame_timing = *timing;
     rtsp->published_us = esp_timer_get_time();
     rtsp->frame_pending = true;
     xSemaphoreGive(rtsp->frame_mutex);
