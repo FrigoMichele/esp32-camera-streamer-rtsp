@@ -7,6 +7,7 @@
 #include "esp_sccb_i2c.h"
 #include "ov5647.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "mipi_camera.h"
 
 static const char *TAG = "camera";
@@ -77,9 +78,10 @@ static esp_err_t prepare_ov5647(esp_cam_sensor_device_t **sensor,
     return ESP_ERR_NOT_SUPPORTED;
 }
 
-// Initialize the camera and process frames in the main task.
-void app_main(void)
+// Initialize the camera and process frames in a dedicated task.
+static void camera_task(void *arg)
 {
+    (void)arg;
     esp_cam_sensor_device_t *sensor = NULL;
     mipi_camera_config_t cfg = {0};
     ESP_ERROR_CHECK(prepare_ov5647(&sensor, &cfg));
@@ -98,7 +100,7 @@ void app_main(void)
         }
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "Could not get frame: %s", esp_err_to_name(err));
-            return;
+            break;
         }
 
         // Use frame.data before returning the buffer to CSI.
@@ -112,4 +114,12 @@ void app_main(void)
         previous_timestamp_us = frame.timestamp_us;
         ESP_ERROR_CHECK(mipi_camera_release_frame(&frame));
     }
+    vTaskDelete(NULL);
+}
+
+void app_main(void)
+{
+    BaseType_t created = xTaskCreate(camera_task, "camera", 4096, NULL,
+                                     tskIDLE_PRIORITY + 1, NULL);
+    ESP_ERROR_CHECK(created == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
 }

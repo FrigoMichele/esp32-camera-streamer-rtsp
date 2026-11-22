@@ -18,7 +18,7 @@ static const char *TAG = "MIPI_CAMERA";
 static esp_cam_ctlr_handle_t s_camera;
 static isp_proc_handle_t s_isp;
 static QueueHandle_t s_free_queue;  // Buffer pointers available to CSI.
-static QueueHandle_t s_ready_queue; // Completed frames waiting for app_main.
+static QueueHandle_t s_ready_queue; // Completed frames waiting for the camera task.
 
 static size_t s_frame_size;
 static uint32_t s_sequence;
@@ -32,7 +32,7 @@ static bool IRAM_ATTR camera_next_buffer(esp_cam_ctlr_handle_t camera,
     uint8_t *buffer;
     BaseType_t woken = pdFALSE;
 
-    // CSI asks for the first buffer in app_main and subsequent buffers in the ISR.
+    // CSI asks for the first buffer in task context and subsequent buffers in the ISR.
     BaseType_t ready = xPortInIsrContext()
         ? xQueueReceiveFromISR(s_free_queue, &buffer, &woken)
         : xQueueReceive(s_free_queue, &buffer, 0);
