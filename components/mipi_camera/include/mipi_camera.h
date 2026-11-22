@@ -18,7 +18,7 @@ typedef struct {
 } mipi_camera_config_t;
 
 typedef struct {
-    const uint8_t *data;  // RGB565; valid until release.
+    const uint8_t *data;  // YUV420 in native ISP layout; valid until release.
     size_t size;
     uint32_t sequence;
     int64_t timestamp_us;

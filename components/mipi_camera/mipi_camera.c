@@ -83,9 +83,13 @@ esp_err_t mipi_camera_init(
         return ESP_ERR_INVALID_STATE;
     }
 
-    // The configured RGB565 output uses two bytes per pixel.
-    s_frame_size =
-        (size_t)config->width * config->height * 2;
+    if ((config->width | config->height) & 1U) {
+        ESP_LOGE(TAG, "YUV420 requires even width and height");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // YUV420 uses 12 bits per pixel.
+    s_frame_size = (size_t)config->width * config->height * 3 / 2;
 
     s_free_queue = xQueueCreate(
         FRAME_COUNT, sizeof(uint8_t *));
@@ -121,7 +125,7 @@ esp_err_t mipi_camera_init(
         .input_data_color_type =
             CAM_CTLR_COLOR_RAW8,
         .output_data_color_type =
-            CAM_CTLR_COLOR_RGB565,
+            CAM_CTLR_COLOR_YUV420,
         .data_lane_num = config->lane_count,
         .byte_swap_en = false,
         .queue_items = FRAME_COUNT,
@@ -149,12 +153,12 @@ esp_err_t mipi_camera_init(
         return err;
     }
 
-    // The ISP converts the sensor's RAW8 Bayer data to RGB565.
+    // The ISP converts the sensor's RAW8 Bayer data to YUV420.
     const esp_isp_processor_cfg_t isp_cfg = {
         .clk_hz = 80000000,
         .input_data_source = ISP_INPUT_DATA_SOURCE_CSI,
         .input_data_color_type = ISP_COLOR_RAW8,
-        .output_data_color_type = ISP_COLOR_RGB565,
+        .output_data_color_type = ISP_COLOR_YUV420,
         .has_line_start_packet = config->has_line_start_packet,
         .has_line_end_packet = config->has_line_end_packet,
         .h_res = config->width,
