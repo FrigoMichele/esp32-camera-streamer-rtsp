@@ -88,6 +88,7 @@ void app_main(void)
     // Start streaming only after CSI and the ISP are ready.
     int stream_on = 1;
     ESP_ERROR_CHECK(esp_cam_sensor_ioctl(sensor, ESP_CAM_SENSOR_IOC_S_STREAM, &stream_on));
+    int64_t previous_timestamp_us = -1;
     while (true) {
         mipi_frame_t frame;
         esp_err_t err = mipi_camera_get_frame(&frame, pdMS_TO_TICKS(2000));
@@ -101,8 +102,14 @@ void app_main(void)
         }
 
         // Use frame.data before returning the buffer to CSI.
-        ESP_LOGI(TAG, "Frame %" PRIu32 ": %zu bytes at %" PRId64 " us",
-                 frame.sequence, frame.size, frame.timestamp_us);
+        if (previous_timestamp_us >= 0) {
+            ESP_LOGI(TAG, "Frame %" PRIu32 ": %zu bytes, %" PRId64 " us since previous frame",
+                     frame.sequence, frame.size, frame.timestamp_us - previous_timestamp_us);
+        } else {
+            ESP_LOGI(TAG, "Frame %" PRIu32 ": %zu bytes (first frame)",
+                     frame.sequence, frame.size);
+        }
+        previous_timestamp_us = frame.timestamp_us;
         ESP_ERROR_CHECK(mipi_camera_release_frame(&frame));
     }
 }
