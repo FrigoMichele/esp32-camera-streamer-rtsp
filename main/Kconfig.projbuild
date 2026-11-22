@@ -12,4 +12,18 @@ menu "RTSP Ethernet settings"
         string "IPv4 gateway (0.0.0.0 for no gateway)"
         default "0.0.0.0"
 
+    choice CAMERA_RTSP_RTP_TRANSPORT
+        prompt "Recommended RTP transport"
+        default CAMERA_RTSP_RTP_UDP
+        help
+            Sets the transport in the logged ffplay command. The RTSP
+            server still uses the transport requested by the client in SETUP.
+
+        config CAMERA_RTSP_RTP_UDP
+            bool "UDP (lower latency on a clean LAN)"
+
+        config CAMERA_RTSP_RTP_TCP
+            bool "TCP (interleaved RTP)"
+    endchoice
+
 endmenu

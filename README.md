@@ -15,8 +15,10 @@ Set the static IPv4 address, subnet mask, and gateway in `idf.py menuconfig` →
 Connect the Function EV Board's onboard RJ45 port. Once the link is up, the `rtsp_connection` task logs the static IP and starts a video-only server using `espressif/esp_media_protocols` 1.0.3. Use the URL printed in the serial log, for example:
 
 ```sh
-ffplay -rtsp_transport tcp rtsp://192.168.1.123:8554/live
+ffplay -rtsp_transport udp rtsp://192.168.1.123:8554/live
 ```
+
+**RTSP Ethernet settings → Recommended RTP transport** defaults to UDP and controls the `ffplay` command printed at startup. The server does not force the transport; the client selects it in RTSP `SETUP`.
 
 The server is unauthenticated; use it only on a trusted LAN. The RTSP handoff holds at most one queued encoded frame and never waits in the library callback. New sessions and interrupted streams resume at an IDR. RTSP copies encoded bytes into the library's staging buffer; raw camera frames remain zero-copy.
 

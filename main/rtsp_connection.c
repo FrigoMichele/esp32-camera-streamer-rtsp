@@ -164,6 +164,14 @@ static void connection_task(void *arg)
     }
     ESP_LOGI(TAG, "Waiting for Ethernet link (static IP: %s)", CONFIG_CAMERA_ETH_STATIC_IP);
 
+#if CONFIG_CAMERA_RTSP_RTP_TCP
+    const esp_rtsp_transport_t preferred_transport = RTSP_TRANSPORT_TCP;
+    const char *transport_name = "tcp";
+#else
+    const esp_rtsp_transport_t preferred_transport = RTSP_TRANSPORT_UDP;
+    const char *transport_name = "udp";
+#endif
+
     char address[16];
     esp_rtsp_data_cb_t callbacks = {.send_video = supply_video};
     esp_rtsp_config_t cfg = {
@@ -176,7 +184,7 @@ static void connection_task(void *arg)
         .state = on_rtsp_state,
         .stack_size = 6144,
         .task_prio = tskIDLE_PRIORITY + 2,
-        .trans = RTSP_TRANSPORT_TCP,
+        .trans = preferred_transport, // Library client default; server uses SETUP.
     };
 
     esp_rtsp_handle_t server = NULL;
@@ -216,6 +224,8 @@ static void connection_task(void *arg)
             if (server) {
                 bound_ip = ip.ip.addr;
                 ESP_LOGI(TAG, "RTSP URI: rtsp://%s:%d/live", address, RTSP_PORT);
+                ESP_LOGI(TAG, "ffplay -rtsp_transport %s rtsp://%s:%d/live",
+                         transport_name, address, RTSP_PORT);
             } else {
                 ESP_LOGE(TAG, "Could not start RTSP server on %s:%d", address, RTSP_PORT);
             }
