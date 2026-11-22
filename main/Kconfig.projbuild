@@ -1,0 +1,15 @@
+menu "RTSP Ethernet settings"
+
+    config CAMERA_ETH_STATIC_IP
+        string "Static IPv4 address"
+        default "192.168.1.123"
+
+    config CAMERA_ETH_STATIC_NETMASK
+        string "IPv4 subnet mask"
+        default "255.255.255.0"
+
+    config CAMERA_ETH_STATIC_GATEWAY
+        string "IPv4 gateway (0.0.0.0 for no gateway)"
+        default "0.0.0.0"
+
+endmenu

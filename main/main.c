@@ -10,6 +10,7 @@
 #include "freertos/task.h"
 #include "mipi_camera.h"
 #include "h264_encoder.h"
+#include "rtsp_connection.h"
 
 static const char *TAG = "camera";
 
@@ -80,9 +81,17 @@ static esp_err_t prepare_ov5647(esp_cam_sensor_device_t **sensor,
     return ESP_ERR_NOT_SUPPORTED;
 }
 
+typedef struct {
+    TaskHandle_t main_task;
+    uint32_t width;
+    uint32_t height;
+    uint8_t fps;
+} encoder_startup_t;
+
 // Sole consumer of raw camera frames; CSI callbacks never run encoder code.
-static void encoder_task(void *main_task)
+static void encoder_task(void *arg)
 {
+    encoder_startup_t *startup = arg;
     esp_cam_sensor_device_t *sensor = NULL;
     mipi_camera_config_t cfg = {0};
     uint8_t fps;
@@ -93,7 +102,10 @@ static void encoder_task(void *main_task)
     // Start streaming only after CSI and the ISP are ready.
     int stream_on = 1;
     ESP_ERROR_CHECK(esp_cam_sensor_ioctl(sensor, ESP_CAM_SENSOR_IOC_S_STREAM, &stream_on));
-    xTaskNotifyGive((TaskHandle_t)main_task);
+    startup->width = cfg.width;
+    startup->height = cfg.height;
+    startup->fps = fps;
+    xTaskNotifyGive(startup->main_task);
     while (true) {
         esp_err_t err = h264_encoder_process_next(pdMS_TO_TICKS(2000));
         if (err == ESP_ERR_TIMEOUT) {
@@ -106,17 +118,21 @@ static void encoder_task(void *main_task)
 
 void app_main(void)
 {
-    BaseType_t created = xTaskCreate(encoder_task, "h264_encoder", 8192, xTaskGetCurrentTaskHandle(),
+    encoder_startup_t startup = {.main_task = xTaskGetCurrentTaskHandle()};
+    BaseType_t created = xTaskCreate(encoder_task, "h264_encoder", 8192, &startup,
                                      tskIDLE_PRIORITY + 1, NULL);
     ESP_ERROR_CHECK(created == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
     // Wait for output pool and camera startup.
-    ulTaskNotifyTake(pdTRUE, portMAX_DELAY); 
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    esp_err_t err = rtsp_connection_start(startup.width, startup.height, startup.fps);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "RTSP unavailable: %s", esp_err_to_name(err));
+    }
 
     int64_t previous_timestamp_us = -1;
     while (true) {
         h264_frame_t frame;
         ESP_ERROR_CHECK(h264_encoder_get_frame(&frame, portMAX_DELAY));
-        // Consume frame.data[0..size) here before releasing the encoded slot.
         if (previous_timestamp_us >= 0) {
             ESP_LOGI(TAG, "H.264 frame %" PRIu32 ": %zu bytes, encode %" PRId64
                      " us, %" PRId64 " us since previous frame", frame.sequence, frame.size,
@@ -126,6 +142,8 @@ void app_main(void)
                      frame.sequence, frame.size, frame.encode_us);
         }
         previous_timestamp_us = frame.timestamp_us;
-        ESP_ERROR_CHECK(h264_encoder_release_frame(&frame));
+        if (!rtsp_connection_offer(&frame)) {
+            ESP_ERROR_CHECK(h264_encoder_release_frame(&frame));
+        }
     }
 }

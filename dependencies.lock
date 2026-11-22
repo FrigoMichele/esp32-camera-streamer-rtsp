@@ -48,6 +48,43 @@ dependencies:
     - esp32s31
     - esp32p4
     version: 1.4.1
+  espressif/esp_libsrtp:
+    component_hash: 131560184c73ec09f77d8904a2db709307803f0f9f111898921b6966776eac15
+    dependencies: []
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 1.0.0
+  espressif/esp_media_protocols:
+    component_hash: 8d4227d9c46618789d8d3d9eb87ccc999f216d83580c2345c83362178502cafe
+    dependencies:
+    - name: espressif/esp_libsrtp
+      registry_url: https://components.espressif.com
+      require: private
+      version: ^1.0.0
+    - name: espressif/media_lib_sal
+      registry_url: https://components.espressif.com
+      require: private
+      version: ^1.0
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    targets:
+    - esp32
+    - esp32s2
+    - esp32s3
+    - esp32s31
+    - esp32p4
+    - esp32c2
+    - esp32c3
+    - esp32c5
+    - esp32c6
+    - esp32c61
+    - esp32h4
+    version: 1.0.3
   espressif/esp_sccb_intf:
     component_hash: fcf118cd29a1caaf3b09bacd99975bc035c996b470474dfb950202c16e06d7b5
     dependencies:
@@ -58,6 +95,16 @@ dependencies:
       registry_url: https://components.espressif.com
       type: service
     version: 1.0.0
+  espressif/media_lib_sal:
+    component_hash: af39cd5a569f9125ae4782609cd60a2449887df675cba2359a426d480bb560d1
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.1'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.0.2
   idf:
     source:
       type: idf
@@ -65,6 +112,8 @@ dependencies:
 direct_dependencies:
 - espressif/esp_cam_sensor
 - espressif/esp_h264
-manifest_hash: 79d473b95bce60ccd0704a153c48f265676e5e05e9f46654b76b7716b077b963
+- espressif/esp_media_protocols
+- espressif/media_lib_sal
+manifest_hash: 2fa810987d5cf8b7e9a5b961386ae00633d6526aa18867f8e5e65b8a6003b180
 target: esp32p4
 version: 2.0.0

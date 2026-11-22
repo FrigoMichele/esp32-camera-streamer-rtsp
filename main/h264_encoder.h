@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include "esp_err.h"
@@ -11,6 +12,7 @@ typedef struct {
     uint32_t sequence;
     int64_t timestamp_us;  // Timestamp of the source camera frame.
     int64_t encode_us;     // Elapsed time inside esp_h264_enc_process().
+    bool is_idr;           // The encoder includes SPS/PPS with each IDR.
 } h264_frame_t;
 
 // Initialize once for the camera's native, unswapped ESP32-P4 ISP YUV420 output.

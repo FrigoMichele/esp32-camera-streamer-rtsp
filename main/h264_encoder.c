@@ -136,6 +136,7 @@ static esp_err_t encode_frame(const mipi_frame_t *raw, uint8_t *slot, h264_frame
         .sequence = raw->sequence,
         .timestamp_us = raw->timestamp_us,
         .encode_us = encode_us,
+        .is_idr = out.frame_type == ESP_H264_FRAME_TYPE_IDR,
     };
     return ESP_OK;
 }
