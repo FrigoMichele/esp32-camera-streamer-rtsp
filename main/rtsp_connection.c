@@ -10,6 +10,7 @@
 #include "esp_rtsp.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "mipi_camera.h"
 #include "port/media_lib_adapter.h"
 #include "sdkconfig.h"
 
@@ -244,7 +245,7 @@ esp_err_t rtsp_connection_start(uint32_t width, uint32_t height, uint8_t fps)
         .width = width,
         .height = height,
         .fps = fps,
-        .len = width * height * 3 / 2,  // Same maximum frame size as the encoder output pool.
+        .len = mipi_camera_padded_frame_size(width, height), // Matches the encoder output pool.
     };
 
     if (xTaskCreate(connection_task, "rtsp_connection", 6144, NULL,

@@ -25,12 +25,19 @@ typedef enum {
 typedef struct {
     const uint8_t *data;  // Valid until release.
     mipi_frame_layout_t layout;
-    size_t size;
+    size_t size;           // Captured bytes, excluding bottom padding.
+    size_t capacity;       // Includes initialized padding for the hardware encoder.
     uint32_t sequence;
     int64_t timestamp_us;
 } mipi_frame_t;
 
-// Initialize once, with the RAW8 sensor configured but not yet streaming.
+// Packed YUV420 capacity with height rounded up to a 16-line macroblock.
+static inline size_t mipi_camera_padded_frame_size(uint32_t width, uint32_t height)
+{
+    return (size_t)width * ((height + 15U) & ~15U) * 3 / 2;
+}
+
+// Initialize once, with the RAW10 sensor configured but not yet streaming.
 esp_err_t mipi_camera_init(const mipi_camera_config_t *config);
 
 // Wait up to timeout ticks for a frame; zero polls without blocking.

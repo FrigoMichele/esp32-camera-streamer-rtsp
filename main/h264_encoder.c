@@ -11,7 +11,8 @@
 
 static const char *TAG = "h264";
 static esp_h264_enc_handle_t s_encoder;
-static uint32_t s_frame_bytes;
+static size_t s_visible_bytes;
+static size_t s_frame_bytes;
 static QueueHandle_t s_free;
 static QueueHandle_t s_ready;
 
@@ -56,9 +57,10 @@ esp_err_t h264_encoder_init(uint32_t width, uint32_t height, uint8_t fps)
 {
     ESP_RETURN_ON_FALSE(!s_encoder, ESP_ERR_INVALID_STATE, TAG, "Already initialized");
 
-    // The HW reads whole 16x16 macroblocks. Never invent padding for a CSI frame.
+    // The camera pool pads the bottom only. The encoder signals the visible
+    // height in the SPS crop, and an even height keeps YUV420 row pairs intact.
     ESP_RETURN_ON_FALSE(width >= 80 && width <= 1920 && height >= 80 && height <= 2032 &&
-                        (width % 16) == 0 && (height % 16) == 0 && fps,
+                        (width % 16) == 0 && (height % 2) == 0 && fps,
                         ESP_ERR_NOT_SUPPORTED, TAG, "Unsupported camera geometry or frame rate");
 
     const esp_h264_enc_cfg_hw_t cfg = {
@@ -72,7 +74,8 @@ esp_err_t h264_encoder_init(uint32_t width, uint32_t height, uint8_t fps)
     ESP_RETURN_ON_FALSE(rc == ESP_H264_ERR_OK, ESP_FAIL, TAG, "HW encoder creation failed: %d", rc);
 
     // esp_h264 recommends output capacity >= the macroblock-aligned raw frame size.
-    s_frame_bytes = width * height * 3 / 2;
+    s_visible_bytes = (size_t)width * height * 3 / 2;
+    s_frame_bytes = mipi_camera_padded_frame_size(width, height);
     esp_err_t err = create_output_pool();
     if (err != ESP_OK) {
         delete_output_pool();
@@ -101,16 +104,17 @@ static esp_err_t return_slot(const uint8_t *slot)
 
 static esp_err_t encode_frame(const mipi_frame_t *raw, uint8_t *slot, h264_frame_t *encoded)
 {
-    if (raw->layout != MIPI_LAYOUT_P4_ISP_YUV420 || raw->size != s_frame_bytes ||
-        !raw->data || ((uintptr_t)raw->data % 16) != 0) {
+    if (raw->layout != MIPI_LAYOUT_P4_ISP_YUV420 || raw->size != s_visible_bytes ||
+        raw->capacity < s_frame_bytes || !raw->data || ((uintptr_t)raw->data % 16) != 0) {
         ESP_LOGE(TAG, "Incompatible camera frame: expected native P4 ISP YUV420, "
-                 "%lu bytes, 16-byte aligned", (unsigned long)s_frame_bytes);
+                 "%zu visible bytes, %zu padded bytes, 16-byte aligned",
+                 s_visible_bytes, s_frame_bytes);
         return ESP_ERR_NOT_SUPPORTED;
     }
 
     // esp_h264's input API isn't const-qualified; DMA only reads this buffer.
     esp_h264_enc_in_frame_t in = {
-        .raw_data = {.buffer = (uint8_t *)raw->data, .len = raw->size},
+        .raw_data = {.buffer = (uint8_t *)raw->data, .len = s_frame_bytes},
         .pts = (uint32_t)(raw->timestamp_us / 1000),
     };
     esp_h264_enc_out_frame_t out = {

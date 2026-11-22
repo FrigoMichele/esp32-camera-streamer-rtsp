@@ -58,17 +58,18 @@ static esp_err_t prepare_ov5647(esp_cam_sensor_device_t **sensor,
                         TAG, "Could not list OV5647 formats");
     for (uint32_t i = 0; i < formats.count; ++i) {
         const esp_cam_sensor_format_t *format = &formats.format_array[i];
-        if (format->format != ESP_CAM_SENSOR_PIXFORMAT_RAW8 ||
-            format->width != 800 || format->height != 640) {
+        if (format->format != ESP_CAM_SENSOR_PIXFORMAT_RAW10 ||
+            format->width != 1920 || format->height != 1080 || format->fps != 30) {
             continue;
         }
         ESP_RETURN_ON_ERROR(esp_cam_sensor_set_format(*sensor, format),
-                            TAG, "Could not set OV5647 format");
+                            TAG, "Could not set OV5647 Full HD format");
         *cfg = (mipi_camera_config_t) {
             .width = format->width,
             .height = format->height,
             .lane_count = format->mipi_info.lane_num,
-            .lane_bit_rate_mbps = 200, // ESP-IDF RAW8 800x640 example setting.
+            // OV5647 reports the per-lane bit rate (pixel clock * 10 / 2).
+            .lane_bit_rate_mbps = (format->mipi_info.mipi_clk + 500000) / 1000000,
             .bayer_order = COLOR_RAW_ELEMENT_ORDER_GBRG,
             .has_line_start_packet = format->mipi_info.line_sync_en,
             .has_line_end_packet = format->mipi_info.line_sync_en,
@@ -77,7 +78,7 @@ static esp_err_t prepare_ov5647(esp_cam_sensor_device_t **sensor,
         ESP_LOGI(TAG, "OV5647 detected: %s", format->name);
         return ESP_OK;
     }
-    ESP_LOGE(TAG, "OV5647 RAW8 800x640 mode not found");
+    ESP_LOGE(TAG, "OV5647 RAW10 1920x1080 at 30 fps mode not found");
     return ESP_ERR_NOT_SUPPORTED;
 }
 

@@ -1,6 +1,8 @@
 #include "mipi_camera.h"
 
+#include <string.h>
 #include "esp_attr.h"
+#include "esp_cache.h"
 #include "esp_cam_ctlr.h"
 #include "esp_cam_ctlr_csi.h"
 #include "esp_cam_ctlr_types.h"
@@ -21,6 +23,7 @@ static QueueHandle_t s_free_queue;  // Buffer pointers available to CSI.
 static QueueHandle_t s_ready_queue; // Completed frames waiting for the camera task.
 
 static size_t s_frame_size;
+static size_t s_frame_capacity;
 static uint32_t s_sequence;
 static mipi_frame_layout_t s_layout;
 
@@ -59,6 +62,7 @@ static bool IRAM_ATTR camera_frame_done(esp_cam_ctlr_handle_t camera,
         .data = buffer,
         .layout = s_layout,
         .size = trans->received_size,
+        .capacity = s_frame_capacity,
         .sequence = ++s_sequence,
         .timestamp_us = esp_timer_get_time(),
     };
@@ -92,6 +96,7 @@ esp_err_t mipi_camera_init(
 
     // YUV420 uses 12 bits per pixel.
     s_frame_size = (size_t)config->width * config->height * 3 / 2;
+    s_frame_capacity = mipi_camera_padded_frame_size(config->width, config->height);
 
     s_free_queue = xQueueCreate(
         FRAME_COUNT, sizeof(uint8_t *));
@@ -107,11 +112,22 @@ esp_err_t mipi_camera_init(
     for (uint8_t i = 0; i < FRAME_COUNT; i++) {
         uint8_t *buffer = heap_caps_aligned_alloc(
             64,
-            s_frame_size,
+            s_frame_capacity,
             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 
         if (!buffer) {
             return ESP_ERR_NO_MEM;
+        }
+
+        // CSI writes only the visible rows. Initialize the encoder's bottom
+        // padding once, before DMA starts; 0x80 is neutral gray in packed YUV420.
+        if (s_frame_capacity > s_frame_size) {
+            memset(buffer + s_frame_size, 0x80, s_frame_capacity - s_frame_size);
+            esp_err_t err = esp_cache_msync(buffer, s_frame_capacity, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+            if (err != ESP_OK) {
+                heap_caps_free(buffer);
+                return err;
+            }
         }
 
         xQueueSend(s_free_queue, &buffer, 0);
@@ -125,7 +141,7 @@ esp_err_t mipi_camera_init(
         .lane_bit_rate_mbps =
             config->lane_bit_rate_mbps,
         .input_data_color_type =
-            CAM_CTLR_COLOR_RAW8,
+            CAM_CTLR_COLOR_RAW10,
         .output_data_color_type =
             CAM_CTLR_COLOR_YUV420,
         .data_lane_num = config->lane_count,
@@ -155,11 +171,11 @@ esp_err_t mipi_camera_init(
         return err;
     }
 
-    // The ISP converts the sensor's RAW8 Bayer data to YUV420.
+    // The ISP converts the sensor's RAW10 Bayer data to YUV420.
     const esp_isp_processor_cfg_t isp_cfg = {
-        .clk_hz = 80000000,
+        .clk_hz = 160000000,
         .input_data_source = ISP_INPUT_DATA_SOURCE_CSI,
-        .input_data_color_type = ISP_COLOR_RAW8,
+        .input_data_color_type = ISP_COLOR_RAW10,
         .output_data_color_type = ISP_COLOR_YUV420,
         .has_line_start_packet = config->has_line_start_packet,
         .has_line_end_packet = config->has_line_end_packet,
