@@ -22,6 +22,7 @@ static QueueHandle_t s_ready_queue; // Completed frames waiting for the camera t
 
 static size_t s_frame_size;
 static uint32_t s_sequence;
+static mipi_frame_layout_t s_layout;
 
 // Supply a free DMA buffer without blocking.
 static bool IRAM_ATTR camera_next_buffer(esp_cam_ctlr_handle_t camera,
@@ -56,6 +57,7 @@ static bool IRAM_ATTR camera_frame_done(esp_cam_ctlr_handle_t camera,
     uint8_t *buffer = trans->buffer;
     mipi_frame_t frame = {
         .data = buffer,
+        .layout = s_layout,
         .size = trans->received_size,
         .sequence = ++s_sequence,
         .timestamp_us = esp_timer_get_time(),
@@ -174,6 +176,10 @@ esp_err_t mipi_camera_init(
         return err;
     }
 
+    // Only advertise the layout verified for this ISP/CSI configuration.
+    s_layout = (isp_cfg.output_data_color_type == ISP_COLOR_YUV420 &&
+                csi_cfg.output_data_color_type == CAM_CTLR_COLOR_YUV420 && !csi_cfg.byte_swap_en)
+               ? MIPI_LAYOUT_P4_ISP_YUV420 : MIPI_LAYOUT_UNKNOWN;
     err = esp_cam_ctlr_start(s_camera);
     if (err != ESP_OK) {
         return err;

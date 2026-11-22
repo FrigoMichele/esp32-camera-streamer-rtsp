@@ -17,8 +17,14 @@ typedef struct {
     bool has_line_end_packet;
 } mipi_camera_config_t;
 
+typedef enum {
+    MIPI_LAYOUT_UNKNOWN = 0,
+    MIPI_LAYOUT_P4_ISP_YUV420,  // Native packed UYY/VYY, no CSI byte swap.
+} mipi_frame_layout_t;
+
 typedef struct {
-    const uint8_t *data;  // YUV420 in native ISP layout; valid until release.
+    const uint8_t *data;  // Valid until release.
+    mipi_frame_layout_t layout;
     size_t size;
     uint32_t sequence;
     int64_t timestamp_us;

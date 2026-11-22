@@ -9,12 +9,13 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "mipi_camera.h"
+#include "h264_encoder.h"
 
 static const char *TAG = "camera";
 
 // Power the CSI PHY and configure the OV5647 without starting its stream.
 static esp_err_t prepare_ov5647(esp_cam_sensor_device_t **sensor,
-                               mipi_camera_config_t *cfg)
+                               mipi_camera_config_t *cfg, uint8_t *fps)
 {
     // Function EV Board wiring from test/rtsp-streamer.
     const esp_ldo_channel_config_t phy_power = {
@@ -71,6 +72,7 @@ static esp_err_t prepare_ov5647(esp_cam_sensor_device_t **sensor,
             .has_line_start_packet = format->mipi_info.line_sync_en,
             .has_line_end_packet = format->mipi_info.line_sync_en,
         };
+        *fps = format->fps;
         ESP_LOGI(TAG, "OV5647 detected: %s", format->name);
         return ESP_OK;
     }
@@ -78,48 +80,52 @@ static esp_err_t prepare_ov5647(esp_cam_sensor_device_t **sensor,
     return ESP_ERR_NOT_SUPPORTED;
 }
 
-// Initialize the camera and process frames in a dedicated task.
-static void camera_task(void *arg)
+// Sole consumer of raw camera frames; CSI callbacks never run encoder code.
+static void encoder_task(void *main_task)
 {
-    (void)arg;
     esp_cam_sensor_device_t *sensor = NULL;
     mipi_camera_config_t cfg = {0};
-    ESP_ERROR_CHECK(prepare_ov5647(&sensor, &cfg));
+    uint8_t fps;
+    ESP_ERROR_CHECK(prepare_ov5647(&sensor, &cfg, &fps));
     ESP_ERROR_CHECK(mipi_camera_init(&cfg));
+    ESP_ERROR_CHECK(h264_encoder_init(cfg.width, cfg.height, fps));
 
     // Start streaming only after CSI and the ISP are ready.
     int stream_on = 1;
     ESP_ERROR_CHECK(esp_cam_sensor_ioctl(sensor, ESP_CAM_SENSOR_IOC_S_STREAM, &stream_on));
-    int64_t previous_timestamp_us = -1;
+    xTaskNotifyGive((TaskHandle_t)main_task);
     while (true) {
-        mipi_frame_t frame;
-        esp_err_t err = mipi_camera_get_frame(&frame, pdMS_TO_TICKS(2000));
+        esp_err_t err = h264_encoder_process_next(pdMS_TO_TICKS(2000));
         if (err == ESP_ERR_TIMEOUT) {
             ESP_LOGW(TAG, "No frame received; check sensor streaming and CSI settings");
             continue;
         }
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Could not get frame: %s", esp_err_to_name(err));
-            break;
-        }
-
-        // Use frame.data before returning the buffer to CSI.
-        if (previous_timestamp_us >= 0) {
-            ESP_LOGI(TAG, "Frame %" PRIu32 ": %zu bytes, %" PRId64 " us since previous frame",
-                     frame.sequence, frame.size, frame.timestamp_us - previous_timestamp_us);
-        } else {
-            ESP_LOGI(TAG, "Frame %" PRIu32 ": %zu bytes (first frame)",
-                     frame.sequence, frame.size);
-        }
-        previous_timestamp_us = frame.timestamp_us;
-        ESP_ERROR_CHECK(mipi_camera_release_frame(&frame));
+        ESP_ERROR_CHECK(err);
     }
-    vTaskDelete(NULL);
 }
 
 void app_main(void)
 {
-    BaseType_t created = xTaskCreate(camera_task, "camera", 4096, NULL,
+    BaseType_t created = xTaskCreate(encoder_task, "h264_encoder", 8192, xTaskGetCurrentTaskHandle(),
                                      tskIDLE_PRIORITY + 1, NULL);
     ESP_ERROR_CHECK(created == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
+    // Wait for output pool and camera startup.
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY); 
+
+    int64_t previous_timestamp_us = -1;
+    while (true) {
+        h264_frame_t frame;
+        ESP_ERROR_CHECK(h264_encoder_get_frame(&frame, portMAX_DELAY));
+        // Consume frame.data[0..size) here before releasing the encoded slot.
+        if (previous_timestamp_us >= 0) {
+            ESP_LOGI(TAG, "H.264 frame %" PRIu32 ": %zu bytes, encode %" PRId64
+                     " us, %" PRId64 " us since previous frame", frame.sequence, frame.size,
+                     frame.encode_us, frame.timestamp_us - previous_timestamp_us);
+        } else {
+            ESP_LOGI(TAG, "H.264 frame %" PRIu32 ": %zu bytes, encode %" PRId64 " us (first frame)",
+                     frame.sequence, frame.size, frame.encode_us);
+        }
+        previous_timestamp_us = frame.timestamp_us;
+        ESP_ERROR_CHECK(h264_encoder_release_frame(&frame));
+    }
 }

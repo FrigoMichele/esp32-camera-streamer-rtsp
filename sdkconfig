@@ -1695,6 +1695,13 @@ CONFIG_CAM_CTLR_SPI_DECODE_TASK_PRIORITY=10
 # end of Espressif Camera Sensors Configurations
 
 #
+# ESP H264 Configuration
+#
+CONFIG_ESP_H264_DECODER_IRAM=y
+# CONFIG_ESP_H264_DUAL_TASK is not set
+# end of ESP H264 Configuration
+
+#
 # Espressif SCCB Configurations
 #
 CONFIG_ESP_SCCB_TRANS_TIMEOUT_DEFAULT=500
